@@ -118,7 +118,7 @@ class RunStore:
     @classmethod
     def open(cls, run_dir: Path) -> RunStore:
         if not run_dir.is_dir():
-            raise FileNotFoundError(f"Run folder not found: {run_dir}")
+            raise FileNotFoundError(2, "Run folder not found", str(run_dir))
         return cls(run_dir.parent, run_dir.name)
 
     def path(self, name: str) -> Path:
