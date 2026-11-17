@@ -1,0 +1,120 @@
+{
+  "product_name": "Claim Status Updates (sample)",
+  "problem_statement": "Claimants do not know what is happening with their home or auto claim, so they call the contact centre to ask, wait on hold, and feel anxious, especially customers who are not comfortable with apps.",
+  "vision": "Every claimant always knows where their claim stands and what happens next, without having to call or log in.",
+  "target_users": [
+    "Home and auto claimants, including older customers",
+    "Claims handlers",
+    "Contact centre agents"
+  ],
+  "epics": [
+    {
+      "ref": "epic-proactive-updates",
+      "title": "Proactive claim status updates",
+      "summary": "Tell claimants by text or email whenever their claim moves to a new stage, in plain language, with the next step.",
+      "business_outcome": "Fewer 'where is my claim' calls and higher claimant satisfaction during the claim.",
+      "success_metrics": [
+        "Status-enquiry calls per open claim down 30% within 6 months of launch",
+        "Claim journey satisfaction (CSAT) up 10 points for notified claimants"
+      ],
+      "priority": "must",
+      "in_mvp": true,
+      "features": [
+        {
+          "ref": "feat-stage-alerts",
+          "title": "Stage change alerts by SMS and email",
+          "description": "When a claim reaches a new stage (received, adjuster assigned, inspection booked, documents needed, payment approved, paid), send the claimant a short message that explains the stage and what happens next.",
+          "benefit_hypothesis": "If claimants are told about each stage as it happens, they will not need to call to ask, and status calls will fall.",
+          "priority": "must",
+          "stories": [
+            {
+              "ref": "story-consent",
+              "title": "Capture contact preference and consent",
+              "kind": "user",
+              "user_story": "As a claimant, I want to choose whether I get updates by text, email or not at all, so that I am contacted only the way I agreed to.",
+              "description": "Ask for channel preference and consent when the claim is filed (online or by phone). Store the choice with a timestamp and source for audit.",
+              "acceptance_criteria": [
+                {"given": "a new claim is being filed", "when": "the claimant reaches the contact step", "then": "they can choose text, email or no updates, and no option is pre-selected"},
+                {"given": "a claimant chose no updates", "when": "their claim changes stage", "then": "no message is sent and the decision is logged"},
+                {"given": "a claimant changes their preference", "when": "the change is saved", "then": "the new choice applies to the next message and the old and new values are kept with timestamps"}
+              ],
+              "story_points": 5,
+              "priority": "must",
+              "depends_on": [],
+              "labels": ["privacy", "consent"]
+            },
+            {
+              "ref": "story-send-alert",
+              "title": "Send plain-language alert on stage change",
+              "kind": "user",
+              "user_story": "As a claimant, I want a short message when my claim moves to a new stage, so that I know what is happening without calling.",
+              "description": "Templates per stage, written at a reading age of about 9, with the next step and any action needed. Send within 15 minutes of the stage change.",
+              "acceptance_criteria": [
+                {"given": "a claimant opted in to text updates", "when": "their claim moves to 'adjuster assigned'", "then": "they receive a text within 15 minutes naming the stage and the next step"},
+                {"given": "a message template", "when": "it is checked before release", "then": "it scores at or below grade 6 on a readability check and contains no internal jargon"}
+              ],
+              "story_points": 8,
+              "priority": "must",
+              "depends_on": ["story-consent"],
+              "labels": ["notifications"]
+            }
+          ]
+        },
+        {
+          "ref": "feat-handler-history",
+          "title": "Message history for claims handlers",
+          "description": "Show handlers and contact centre agents every message sent to a claimant, when, through which channel, and whether it was delivered.",
+          "benefit_hypothesis": "If agents can see what the claimant was told, calls that do come in will be shorter and answers will be consistent.",
+          "priority": "should",
+          "stories": [
+            {
+              "ref": "story-history-view",
+              "title": "Show sent messages on the claim record",
+              "kind": "user",
+              "user_story": "As a claims handler, I want to see every update sent to a claimant on the claim record, so that I can answer questions consistently.",
+              "description": "A timeline on the claim record showing time sent, channel, template, and delivery status.",
+              "acceptance_criteria": [
+                {"given": "a claim with three messages sent", "when": "a handler opens the claim record", "then": "all three appear newest first with time, channel and delivery status"},
+                {"given": "a message failed to deliver", "when": "the handler views the timeline", "then": "the failure is flagged and the reason is shown"}
+              ],
+              "story_points": 3,
+              "priority": "should",
+              "depends_on": ["story-send-alert"],
+              "labels": ["claims-handler"]
+            },
+            {
+              "ref": "story-delivery-spike",
+              "title": "Spike: compare SMS delivery providers",
+              "kind": "spike",
+              "user_story": "Find out which SMS provider meets delivery, cost and data-residency needs before the alert service is built.",
+              "description": "Time-box to 3 days. Compare at least two providers on delivery receipts, US data residency, cost per message, and opt-out handling.",
+              "acceptance_criteria": [
+                {"given": "the time box has ended", "when": "the team reviews the findings", "then": "a short written recommendation with a cost estimate is attached to this issue"}
+              ],
+              "story_points": 2,
+              "priority": "should",
+              "depends_on": [],
+              "labels": ["spike"]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "assumptions": [
+    "The claims system emits an event or can be polled when a claim changes stage",
+    "Claimants' mobile numbers and emails are already captured at first notice of loss"
+  ],
+  "open_questions": [
+    "Which stages matter most to claimants in the first release?",
+    "Does compliance need to approve each message template before release?"
+  ],
+  "out_of_scope": [
+    "Two-way chat with an adjuster",
+    "Filing a new claim by text"
+  ],
+  "risks": [
+    "Stage data in the legacy claims system may lag behind reality",
+    "Text messaging rules (consent, quiet hours) differ by state"
+  ]
+}

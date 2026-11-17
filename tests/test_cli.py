@@ -6,7 +6,13 @@ import json
 import httpx
 
 from vigilant_engine.integrations.jira import JiraClient, JiraConfig
-from vigilant_engine.interfaces.cli import build_parser, cmd_plan, cmd_publish, cmd_verify
+from vigilant_engine.interfaces.cli import (
+    build_parser,
+    cmd_import,
+    cmd_plan,
+    cmd_publish,
+    cmd_verify,
+)
 
 from .conftest import FULL_HIERARCHY, FakeJira, FakeLLM
 
@@ -96,3 +102,24 @@ def test_tampered_event_log_fails_verification(tmp_path, backlog_dict):
     log.write_text(log.read_text().replace("agent:intake", "agent:someone-else", 1))
     args = build_parser().parse_args(["intake", "verify", "--run", str(run_dir)])
     assert cmd_verify(args, out=io.StringIO()) == 1
+
+
+def test_import_runs_the_gate_and_feeds_publish(tmp_path, backlog_dict, make_backlog):
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps(backlog_dict))
+    args = build_parser().parse_args(["intake", "import", "--backlog-file", str(good),
+                                      "--runs-dir", str(tmp_path / "runs")])
+    assert cmd_import(args, out=io.StringIO()) == 0
+    run_dir = next((tmp_path / "runs").iterdir())
+    assert (run_dir / "backlog.md").exists()
+    pub = build_parser().parse_args(["intake", "publish", "--run", str(run_dir),
+                                     "--project", "CLM"])
+    assert cmd_publish(pub, client=jira_client(FakeJira(FULL_HIERARCHY)),
+                       out=io.StringIO()) == 0
+
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"product_name": "x",}')
+    args = build_parser().parse_args(["intake", "import", "--backlog-file", str(bad),
+                                      "--runs-dir", str(tmp_path / "runs2")])
+    out = io.StringIO()
+    assert cmd_import(args, out=out) == 1 and "not a valid backlog" in out.getvalue()

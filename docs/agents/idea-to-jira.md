@@ -53,6 +53,10 @@ uv run vigilant intake publish --run runs/<run-id> --project CLAIMS --apply
 
 Exit codes: `0` success, `2` blocked by the quality gate or not confirmed, `1` error.
 
+**Backlog written by a person?** `vigilant intake import --backlog-file my-backlog.json`
+runs it through the same quality gate, review files and evidence trail, with no model
+call. See `examples/backlogs/claim-status-updates.sample.json` for the format.
+
 ## What Claude produces
 
 For every story: a user story ("As a … I want … so that …"), at least two given/when/then
@@ -83,6 +87,8 @@ and the edit is recorded in the event log as a human change.
 | Your project has a **Feature** issue type between Epic and Story (Jira Premium / Advanced Planning hierarchy) | Nothing. `--feature-mode auto` detects it and links Story → Feature → Epic through the `parent` field. |
 | Your project has only **Epic** and **Story** (the default) | `auto` falls back to label mode: stories go under the epic and carry a `feature-<ref>` label and a "Feature:" line. Or pass `--feature-mode label` explicitly. |
 | Your issue types have other names | `--epic-type`, `--feature-type`, `--story-type`. |
+| Your project has **no Story type**, and Feature sits directly under Epic (common in team-managed projects) | `--story-type Subtask`: stories become sub-tasks of their feature (Epic › Feature › Subtask). Label mode is refused in this case, because a sub-task can't sit directly under an epic. |
+| Your project has no story points field | Nothing. Every story's description includes its estimate, priority and kind. |
 | You want story points filled in | `--story-points-field customfield_NNNNN`. The ID differs per site; find it under Jira settings > Issues > Custom fields, or ask your Jira admin. |
 
 Every issue gets the labels `ai-generated`, `vigilant-<run-id>` and `moscow-<priority>`.

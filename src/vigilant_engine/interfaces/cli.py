@@ -74,6 +74,10 @@ def build_parser() -> argparse.ArgumentParser:
     pub.add_argument("--label", action="append", default=[], help="Extra label (repeatable)")
     pub.add_argument("--max-issues", type=int, default=150)
 
+    imp = cmds.add_parser("import", help="Start a run from a backlog JSON written by a person")
+    imp.add_argument("--backlog-file", type=Path, required=True)
+    imp.add_argument("--runs-dir", type=Path, default=Path("runs"))
+
     ver = cmds.add_parser("verify", help="Verify a run's event log")
     ver.add_argument("--run", type=Path, required=True)
     return parser
@@ -253,6 +257,48 @@ def _print_plan(plan: PublishPlan, out: TextIO) -> None:
               file=out)
 
 
+# --- import ------------------------------------------------------------------------------
+
+def cmd_import(args: argparse.Namespace, out: TextIO = sys.stdout) -> int:
+    """Run a hand-written backlog through the same gate, review files and evidence trail."""
+    import json
+
+    from pydantic import ValidationError
+
+    try:
+        backlog = Backlog.model_validate_json(args.backlog_file.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        print(f"File not found: {args.backlog_file}", file=out)
+        return EXIT_ERROR
+    except (ValidationError, json.JSONDecodeError) as exc:
+        print(f"{args.backlog_file} is not a valid backlog:\n{exc}", file=out)
+        return EXIT_ERROR
+
+    findings = lint(backlog)
+    store = RunStore(args.runs_dir)
+    author = f"human:{getpass.getuser()}"
+    store.events.append("run.started", actor=author,
+                        payload={"source": "import", "file": str(args.backlog_file)})
+    store.write_json("backlog.json", backlog.model_dump())
+    store.write_json("lint.json", [f.to_dict() for f in findings])
+    store.write_text("backlog.md", to_markdown(backlog, findings, store.run_id))
+    store.events.append("intake.planned", actor=author,
+                        payload={"backlog_digest": digest(backlog.model_dump()),
+                                 "counts": backlog.counts(), "source": "import",
+                                 "publishable": not has_errors(findings)})
+    c = backlog.counts()
+    print(f"Run {store.run_id}: imported {c['epics']} epics, {c['features']} features, "
+          f"{c['stories']} stories.", file=out)
+    print(f"Review: {store.path('backlog.md')}", file=out)
+    if has_errors(findings):
+        for f in findings:
+            if f.severity == "error":
+                print(f"  error {f.ref}: {f.message}", file=out)
+        return EXIT_BLOCKED
+    print(f"Next: vigilant intake publish --run {store.dir} --project <KEY>", file=out)
+    return EXIT_OK
+
+
 # --- verify ------------------------------------------------------------------------------
 
 def cmd_verify(args: argparse.Namespace, out: TextIO = sys.stdout) -> int:
@@ -263,7 +309,8 @@ def cmd_verify(args: argparse.Namespace, out: TextIO = sys.stdout) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    handlers = {"plan": cmd_plan, "publish": cmd_publish, "verify": cmd_verify}
+    handlers = {"plan": cmd_plan, "publish": cmd_publish, "import": cmd_import,
+                "verify": cmd_verify}
     return handlers[args.command](args)
 
 

@@ -185,3 +185,9 @@ DEFAULT_HIERARCHY = [
     {"id": "3", "name": "Story", "subtask": False, "hierarchyLevel": 0},
     {"id": "5", "name": "Task", "subtask": False, "hierarchyLevel": 0},
 ]
+TEAM_MANAGED = [  # shape of the live SAM1 project (team-managed, no Story type)
+    {"id": "10", "name": "Epic", "subtask": False, "hierarchyLevel": 1},
+    {"id": "11", "name": "Subtask", "subtask": True, "hierarchyLevel": -1},
+    {"id": "12", "name": "Feature", "subtask": False, "hierarchyLevel": 0},
+    {"id": "13", "name": "Task", "subtask": False, "hierarchyLevel": 0},
+]

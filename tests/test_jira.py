@@ -17,7 +17,7 @@ from vigilant_engine.integrations.jira import (
     PublishOptions,
 )
 
-from .conftest import DEFAULT_HIERARCHY, FULL_HIERARCHY, FakeJira
+from .conftest import DEFAULT_HIERARCHY, FULL_HIERARCHY, TEAM_MANAGED, FakeJira
 
 
 def client_for(fake: FakeJira) -> JiraClient:
@@ -265,3 +265,31 @@ def test_offline_preview_without_client(backlog_dict, tmp_path):
     report = JiraPublisher(None, tmp_path / "m.json").publish(
         Backlog.model_validate(backlog_dict), opts(feature_mode="label"))
     assert report.feature_mode == "label" and "Preflight skipped" in report.warnings[0]
+
+
+# --- team-managed project with no Story type: Epic > Feature > Subtask ----------------------
+
+def test_stories_as_subtasks_under_features(backlog_dict, tmp_path):
+    fake = FakeJira(TEAM_MANAGED)
+    report = JiraPublisher(client_for(fake), tmp_path / "m.json").publish(
+        Backlog.model_validate(backlog_dict), opts(story_type="Subtask"), dry_run=False)
+    assert report.feature_mode == "issue-type"
+    by_summary = {i["summary"]: i for i in fake.created}
+    feature = by_summary["Claim status page"]
+    story = by_summary["Story story-view-status"]
+    assert feature["issuetype"] == {"name": "Feature"}
+    assert story["issuetype"] == {"name": "Subtask"} and story["parent"] == {"key": feature["key"]}
+    assert "3 story points" in json.dumps(story["description"])
+
+
+def test_subtask_stories_cannot_use_label_mode(backlog_dict, tmp_path):
+    pub = JiraPublisher(client_for(FakeJira(TEAM_MANAGED)), tmp_path / "m.json")
+    with pytest.raises(PublishError, match="sub-task type"):
+        pub.publish(Backlog.model_validate(backlog_dict),
+                    opts(story_type="Subtask", feature_mode="label"))
+
+
+def test_missing_story_type_names_the_option(backlog_dict, tmp_path):
+    pub = JiraPublisher(client_for(FakeJira(TEAM_MANAGED)), tmp_path / "m.json")
+    with pytest.raises(PublishError, match="--story-type"):
+        pub.publish(Backlog.model_validate(backlog_dict), opts())

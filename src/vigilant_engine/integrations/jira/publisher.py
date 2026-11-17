@@ -118,13 +118,20 @@ def resolve_feature_mode(
         warnings.append("Preflight skipped (no Jira connection); hierarchy not verified.")
         return mode, warnings
 
-    types = {t["name"].lower(): t for t in project.get("issueTypes", []) if not t.get("subtask")}
-    for required in (opts.epic_type, opts.story_type):
+    types = {t["name"].lower(): t for t in project.get("issueTypes", [])}
+    available = ", ".join(sorted(t["name"] for t in types.values()))
+    for role, required in (("epic", opts.epic_type), ("story", opts.story_type)):
         if required.lower() not in types:
             raise PublishError(
                 f"Issue type '{required}' is not available in project {opts.project_key}. "
-                f"Available: {', '.join(sorted(t['name'] for t in types.values()))}."
+                f"Available: {available}. Choose one with --{role}-type."
             )
+    if types[opts.epic_type.lower()].get("subtask"):
+        raise PublishError(f"'{opts.epic_type}' is a sub-task type and cannot hold epics.")
+    feature_type = types.get(opts.feature_type.lower())
+    if feature_type is not None and feature_type.get("subtask"):
+        feature_type = None  # a sub-task type cannot have children
+    story_is_subtask = bool(types[opts.story_type.lower()].get("subtask"))
 
     def level(name: str, fallback_key: str | None = None) -> int | None:
         t = types.get(name.lower())
@@ -132,19 +139,27 @@ def resolve_feature_mode(
             return None
         if "hierarchyLevel" in t:
             return t["hierarchyLevel"]
+        if t.get("subtask"):
+            return -1
         return DEFAULT_LEVELS.get(fallback_key) if fallback_key else None
 
     epic_lvl = level(opts.epic_type, "epic")
     story_lvl = level(opts.story_type, "story")
-    feat_lvl = level(opts.feature_type)
-    feature_exists = opts.feature_type.lower() in types
+    feat_lvl = level(opts.feature_type) if feature_type is not None else None
+    feature_exists = feature_type is not None
     ordered = (
         feature_exists
         and None not in (epic_lvl, feat_lvl, story_lvl)
         and epic_lvl > feat_lvl > story_lvl  # type: ignore[operator]
     )
+    subtask_needs_features = (
+        f"'{opts.story_type}' is a sub-task type, so stories must sit under a "
+        f"'{opts.feature_type}' issue; they cannot go directly under an epic."
+    )
 
     if opts.feature_mode == "label":
+        if story_is_subtask:
+            raise PublishError(subtask_needs_features + " Use --feature-mode issue-type.")
         return "label", warnings
     if opts.feature_mode == "issue-type":
         if not feature_exists:
@@ -161,6 +176,8 @@ def resolve_feature_mode(
         return "issue-type", warnings
     if ordered:
         return "issue-type", warnings
+    if story_is_subtask:
+        raise PublishError(subtask_needs_features)
     warnings.append(
         f"'{opts.feature_type}' is not available between {opts.epic_type} and "
         f"{opts.story_type} in {opts.project_key}; features will be labels on their stories."
@@ -473,6 +490,9 @@ def _story_doc(story: Story, feature: Feature, ids: dict[str, str], titles: dict
     blocks = [
         adf.paragraph(adf.text(story.user_story, bold=True)),
         adf.paragraph(story.description),
+        adf.paragraph(adf.text("Estimate: ", bold=True), f"{story.story_points} story points",
+                      adf.text("  ·  Priority: ", bold=True), story.priority.capitalize(),
+                      adf.text("  ·  Kind: ", bold=True), story.kind),
         adf.heading("Acceptance criteria"), adf.bullet_list(criteria),
     ]
     if deps:
