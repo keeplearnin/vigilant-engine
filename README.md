@@ -50,7 +50,8 @@ declared scope per change · least privilege with short-lived capabilities · ag
 guardrails · every action is evidence · bounded autonomy · deterministic replay.
 
 📐 Full design: [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) ·
-Decisions: [`docs/adr/`](docs/adr/)
+Decisions: [`docs/adr/`](docs/adr/) ·
+Enterprise deployment example: [`docs/engagements/the-hartford/`](docs/engagements/the-hartford/)
 
 ---
 

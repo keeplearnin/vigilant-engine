@@ -1,0 +1,37 @@
+# Model routing — governed policy file (changes require eval + canary + red-team + AI-governance approval).
+# Provider: Amazon Bedrock via VPC interface endpoint (ADR-0006).
+# Bedrock model identifiers / inference-profile IDs must be copied from the customer's Bedrock console
+# for the approved region — the values below are placeholders, not real IDs.
+version: 1
+provider:
+  type: bedrock
+  region: us-east-1                     # placeholder — confirm approved region(s)
+  endpoint: vpce                        # private endpoint only; public endpoint blocked by SCP
+  refusal_fallback: client_middleware   # server-side `fallbacks` is not available on Bedrock
+models:
+  opus:   { family: claude-opus-5-5,   bedrock_id: "<bedrock-id-for-claude-opus-5-5>" }
+  sonnet: { family: claude-sonnet-5-5, bedrock_id: "<bedrock-id-for-claude-sonnet-5-5>" }
+  haiku:  { family: claude-haiku-5-5,  bedrock_id: "<bedrock-id-for-claude-haiku-5-5>" }
+excluded_models:
+  - family: claude-fable-*              # Covered Models: 30-day retention required; not approved for this program
+    reason: "Data-retention terms not approved by Privacy/TPRM"
+
+roles:
+  planner:     { model: opus,   effort: high,   output: "structured:Plan",      tools: [repo_read, code_search] }
+  implementer: { model: opus,   effort: medium, runtime: claude-agent-sdk,    tools: [sdk_builtin_fs, bash_sandboxed] }
+  test_author: { model: sonnet, effort: medium, runtime: claude-agent-sdk,    tools: [sdk_builtin_fs, bash_sandboxed], write_scope: tests_only }
+  repair:      { model: sonnet, effort: medium, runtime: claude-agent-sdk,    tools: [sdk_builtin_fs, bash_sandboxed] }
+  critic:      { model: opus,   effort: high,   output: "structured:Finding[]", tools: [], independence: separate_session }
+  quarantine:  { model: haiku,  effort: low,    output: "structured:TaskFields", tools: [] }
+
+caching:
+  order: [tools, system, repo_map, contract]   # stable prefix first; volatile content after last breakpoint
+  verify: usage.cache_read_input_tokens > 0
+
+budgets:                                         # enforced by the engine (task budgets not offered on Bedrock)
+  per_run:  { max_iterations: 6, max_input_tokens: 4000000, max_output_tokens: 400000, max_cost_usd: 40, max_wall_clock_min: 90 }
+  per_team_monthly_usd: 5000                     # placeholder — set by FinOps
+
+dlp:
+  redact: [aws_keys, private_keys, jwt, ssn, bank_account, card_pan, policy_number, claim_number]   # last two: customer regex TBD
+  abort_threshold_per_run: 5

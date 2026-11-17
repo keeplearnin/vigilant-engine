@@ -1,0 +1,72 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/secrets/**)",
+      "Read(./**/*.pem)",
+      "Edit(./.github/**)",
+      "Edit(./CODEOWNERS)",
+      "Edit(./Jenkinsfile)",
+      "Edit(./policies/**)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git push origin main)",
+      "Bash(git push origin master)",
+      "Bash(curl *)",
+      "Bash(wget *)"
+    ],
+    "ask": [
+      "Bash(git push *)"
+    ],
+    "disableBypassPermissionsMode": "disable"
+  },
+  "allowManagedPermissionRulesOnly": true,
+  "allowManagedHooksOnly": true,
+  "allowManagedMcpServersOnly": true,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "/opt/vigilant/bin/vigilant-hook pre-tool-use", "timeout": 30 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "/opt/vigilant/bin/vigilant-hook post-tool-use", "timeout": 30 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/opt/vigilant/bin/vigilant-hook session-stop", "timeout": 30 }
+        ]
+      }
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "network": {
+      "allowedDomains": ["artifactory.example.internal", "github.example.com"],
+      "allowManagedDomainsOnly": true
+    }
+  },
+  "env": {
+    "CLAUDE_CODE_USE_BEDROCK": "1",
+    "AWS_REGION": "us-east-1",
+    "ANTHROPIC_BEDROCK_BASE_URL": "https://model-gateway.example.internal/bedrock",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "<bedrock-id-for-claude-opus-5-5>",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "<bedrock-id-for-claude-sonnet-5-5>",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "<bedrock-id-for-claude-haiku-5-5>",
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "https://otel-collector.example.internal:4317"
+  }
+}

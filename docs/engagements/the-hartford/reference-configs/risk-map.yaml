@@ -1,0 +1,92 @@
+# Risk map — starting point for the customer's AI governance committee (decision D5).
+# Owned in the separate `ai-governance-policies` repo; two-person review required.
+# Paths and tags are ILLUSTRATIVE and must be confirmed per repository during onboarding.
+version: 1
+policy_owner: ai-governance-committee
+defaults:
+  tier_floor: R1            # unknown code is never R0
+  unknown_path_action: R2   # paths not covered by any rule
+  max_changed_files: 25     # above → +1 tier
+  max_changed_lines: 600    # above → +1 tier
+
+# Hard denials for agents (R4). Evaluated first; cannot be lowered by any other rule.
+prohibited:
+  - id: guardrails
+    paths: [".github/**", "CODEOWNERS", "Jenkinsfile", "**/.gitlab-ci.yml", "policies/**", "**/risk-map*.yaml"]
+    reason: "Agents may not modify CI/CD or governance configuration (invariant I7)"
+  - id: decisioning-logic           # ADR-0010
+    tags: [rating, pricing, underwriting-rules, claims-decisioning, fraud-scoring, reserving-models]
+    reason: "AI-governance/model-risk process required; excluded from agent autonomy"
+  - id: secrets-and-identity
+    paths: ["**/*.pem", "**/*.jks", "**/secrets/**", "**/iam/**/policies/**"]
+    reason: "Credential and identity material"
+
+# Minimum tiers by business sensitivity (raise-only).
+sensitivity:
+  - id: sox-scoped
+    source: cmdb.sox_in_scope == true      # resolved from the SOX application inventory (assumption A8)
+    min_tier: R3
+    approvers: [code_owner, sox_app_owner]
+  - id: payments-pci
+    tags: [pci]
+    min_tier: R3
+    approvers: [code_owner, infosec]
+  - id: npi-phi-handling
+    tags: [npi, phi]
+    min_tier: R3
+    approvers: [code_owner, privacy]
+  - id: filed-artifacts                    # state forms / rule tables tied to regulatory filings
+    tags: [regulatory-filing]
+    min_tier: R3
+    approvers: [code_owner, compliance]
+    contract_requires: [filing_reference]
+  - id: claims-billing
+    tags: [claims, billing]
+    min_tier: R3
+    approvers: [code_owner, app_owner]
+  - id: auth-crypto
+    tags: [authn, authz, crypto]
+    min_tier: R3
+    approvers: [code_owner, infosec]
+  - id: iac-prod
+    paths: ["infra/prod/**", "terraform/**/prod/**"]
+    min_tier: R3
+    approvers: [code_owner, cloud_platform]
+  - id: iac-nonprod
+    paths: ["infra/**", "terraform/**"]
+    min_tier: R2
+
+# Low-risk lanes (only apply if no rule above matched).
+low_risk:
+  - id: tests-only
+    paths: ["**/src/test/**", "**/tests/**", "**/*Test.java", "**/test_*.py"]
+    tier: R0
+    conditions: [no_test_deletions, no_assertion_weakening]
+  - id: docs
+    paths: ["docs/**", "**/*.md"]
+    tier: R0
+  - id: patch-dependency-bump
+    change_kind: dependency_update
+    semver: patch
+    tier: R1
+    conditions: [no_new_dependencies, licence_allowed, sca_clean]
+
+# Signal-based uplifts (each +1 tier, monotonic).
+uplifts:
+  - new_dependency
+  - new_outbound_network_call
+  - public_api_signature_change
+  - db_schema_migration
+  - coverage_drop_on_changed_lines
+  - critic_high_severity_finding
+  - repair_iterations_gt: 3
+
+# Hard overrides.
+overrides:
+  - when: any_finding.severity == "critical"
+    action: deny
+  - when: gate.status == "error"
+    action: deny        # fail closed (I3)
+  - when: protected_attribute_reference_in_decisioning_module
+    action: deny
+    notify: [ai-governance-committee]
