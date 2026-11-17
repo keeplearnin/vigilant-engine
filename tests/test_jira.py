@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -91,22 +92,21 @@ def test_issue_cap(backlog_dict, tmp_path):
         pub.publish(Backlog.model_validate(backlog_dict), opts(max_issues=3), dry_run=False)
 
 
-def test_resume_after_failure_creates_no_duplicates(backlog_dict, tmp_path):
+def test_definite_failure_resumes_without_duplicates(backlog_dict, tmp_path):
     backlog = Backlog.model_validate(backlog_dict)
-    fake = FakeJira(FULL_HIERARCHY, fail_after=3)
-    pub = JiraPublisher(client_for(fake), tmp_path / "m.json")
-    with pytest.raises(JiraError):
-        pub.publish(backlog, opts(), dry_run=False)
+    fake = FakeJira(FULL_HIERARCHY, post_script=["ok", "ok", "ok", "400"])
+    with pytest.raises(JiraError, match="400"):
+        JiraPublisher(client_for(fake), tmp_path / "m.json").publish(
+            backlog, opts(), dry_run=False)
     assert len(fake.created) == 3
 
-    fake.fail_after = None
     report = JiraPublisher(client_for(fake), tmp_path / "m.json").publish(
         backlog, opts(), dry_run=False)
     assert len(report.skipped) == 3 and len(report.created) == 3 and len(fake.created) == 6
 
 
 def test_changed_backlog_cannot_resume_partial_publish(backlog_dict, make_backlog, tmp_path):
-    fake = FakeJira(FULL_HIERARCHY, fail_after=2)
+    fake = FakeJira(FULL_HIERARCHY, post_script=["ok", "ok", "400"])
     with pytest.raises(JiraError):
         JiraPublisher(client_for(fake), tmp_path / "m.json").publish(
             Backlog.model_validate(backlog_dict), opts(), dry_run=False)
@@ -117,10 +117,148 @@ def test_changed_backlog_cannot_resume_partial_publish(backlog_dict, make_backlo
 
 
 def test_retries_on_429(backlog_dict, tmp_path):
-    fake = FakeJira(FULL_HIERARCHY, throttle_first=True)
+    fake = FakeJira(FULL_HIERARCHY, post_script=["429", "429"])
     JiraPublisher(client_for(fake), tmp_path / "m.json").publish(
         Backlog.model_validate(backlog_dict), opts(), dry_run=False)
     assert len(fake.created) == 6
+
+
+# --- ambiguous writes are never retried blindly ------------------------------------------
+
+class Clock:
+    def __init__(self):
+        self.now = datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += timedelta(seconds=seconds)
+
+
+def publisher(fake, tmp_path, clock):
+    return JiraPublisher(client_for(fake), tmp_path / "m.json", clock=clock)
+
+
+@pytest.mark.parametrize("failure", ["commit_504", "commit_reset"])
+def test_ambiguous_write_that_committed_is_adopted_not_duplicated(
+        backlog_dict, tmp_path, failure):
+    backlog, clock = Backlog.model_validate(backlog_dict), Clock()
+    fake = FakeJira(FULL_HIERARCHY, post_script=["ok", "ok", failure])
+    with pytest.raises(PublishError, match="may or may not"):
+        publisher(fake, tmp_path, clock).publish(backlog, opts(), dry_run=False)
+    assert len(fake.created) == 3  # the third POST was sent once, never retried
+    manifest = json.loads((tmp_path / "m.json").read_text())
+    assert list(manifest["uncertain"]) == ["S1.1.1"]
+
+    clock.advance(61)
+    report = publisher(fake, tmp_path, clock).publish(backlog, opts(), dry_run=False)
+    assert report.reconciled == {"S1.1.1": "CLM-3"}
+    assert len(fake.created) == 6  # no duplicate
+    assert json.loads((tmp_path / "m.json").read_text())["uncertain"] == {}
+
+
+def test_ambiguous_write_that_did_not_commit_is_created_on_resume(backlog_dict, tmp_path):
+    backlog, clock = Backlog.model_validate(backlog_dict), Clock()
+    fake = FakeJira(FULL_HIERARCHY, post_script=["ok", "504"])
+    with pytest.raises(PublishError):
+        publisher(fake, tmp_path, clock).publish(backlog, opts(), dry_run=False)
+    assert len(fake.created) == 1
+
+    clock.advance(61)
+    report = publisher(fake, tmp_path, clock).publish(backlog, opts(), dry_run=False)
+    assert report.reconciled == {} and len(fake.created) == 6
+
+
+def test_resume_waits_for_search_index(backlog_dict, tmp_path):
+    backlog, clock = Backlog.model_validate(backlog_dict), Clock()
+    fake = FakeJira(FULL_HIERARCHY, post_script=["commit_504"])
+    with pytest.raises(PublishError):
+        publisher(fake, tmp_path, clock).publish(backlog, opts(), dry_run=False)
+    clock.advance(10)
+    with pytest.raises(PublishError, match="Wait"):
+        publisher(fake, tmp_path, clock).publish(backlog, opts(), dry_run=False)
+    assert len(fake.created) == 1
+
+
+def test_several_matches_stop_for_manual_cleanup(backlog_dict, tmp_path):
+    backlog, clock = Backlog.model_validate(backlog_dict), Clock()
+    fake = FakeJira(FULL_HIERARCHY, post_script=["commit_504"])
+    with pytest.raises(PublishError):
+        publisher(fake, tmp_path, clock).publish(backlog, opts(), dry_run=False)
+    fake.created.append({**fake.created[0], "key": "CLM-99"})  # someone retried by hand
+    clock.advance(61)
+    with pytest.raises(PublishError, match="several issues"):
+        publisher(fake, tmp_path, clock).publish(backlog, opts(), dry_run=False)
+
+
+def test_connection_refused_is_safe_to_retry(backlog_dict, tmp_path):
+    fake = FakeJira(FULL_HIERARCHY, post_script=["connect_error"])
+    JiraPublisher(client_for(fake), tmp_path / "m.json").publish(
+        Backlog.model_validate(backlog_dict), opts(), dry_run=False)
+    assert len(fake.created) == 6
+
+
+def test_reads_retry_on_503_and_timeouts(backlog_dict, tmp_path):
+    fake = FakeJira(FULL_HIERARCHY, get_script=["503", "read_timeout"])
+    report = JiraPublisher(client_for(fake), tmp_path / "m.json").publish(
+        Backlog.model_validate(backlog_dict), opts())
+    assert len(report.planned) == 6
+
+
+def test_read_network_errors_become_jira_errors(backlog_dict, tmp_path):
+    fake = FakeJira(FULL_HIERARCHY, get_script=["read_timeout"] * 5)
+    with pytest.raises(JiraError, match="Network error"):
+        JiraPublisher(client_for(fake), tmp_path / "m.json").publish(
+            Backlog.model_validate(backlog_dict), opts())
+
+
+@pytest.mark.parametrize("body", [b"null", b'["bad request"]', b'"oops"', b"<html>x</html>"])
+def test_odd_error_bodies_still_raise_jira_error(body):
+    def handler(request):
+        return httpx.Response(400, content=body)
+    cfg = JiraConfig(base_url="https://example.atlassian.net", email="a@b.c", api_token="t")
+    client = JiraClient(cfg, transport=httpx.MockTransport(handler), sleep=lambda s: None)
+    with pytest.raises(JiraError, match="400"):
+        client.get_project("CLM")
+
+
+# --- the approved plan is the executed plan; resume keeps the same shape -------------------
+
+def test_execute_runs_the_approved_plan_without_replanning(backlog_dict, tmp_path):
+    fake = FakeJira(FULL_HIERARCHY)
+    pub = JiraPublisher(client_for(fake), tmp_path / "m.json")
+    plan = pub.prepare(Backlog.model_validate(backlog_dict), opts())
+    gets_before = sum(r.method == "GET" for r in fake.requests)
+    fake.issue_types = DEFAULT_HIERARCHY  # project changes after approval
+    pub.execute(plan)
+    assert sum(r.method == "GET" for r in fake.requests) == gets_before
+    assert [i["issuetype"]["name"] for i in fake.created].count("Feature") == 2
+
+
+def test_resume_keeps_feature_mode(backlog_dict, tmp_path):
+    backlog = Backlog.model_validate(backlog_dict)
+    fake = FakeJira(FULL_HIERARCHY, post_script=["ok", "ok", "400"])
+    with pytest.raises(JiraError):
+        JiraPublisher(client_for(fake), tmp_path / "m.json").publish(
+            backlog, opts(), dry_run=False)
+
+    with pytest.raises(PublishError, match="issue-type mode"):
+        JiraPublisher(client_for(fake), tmp_path / "m.json").publish(
+            backlog, opts(feature_mode="label"), dry_run=False)
+    with pytest.raises(PublishError, match="issue types"):
+        JiraPublisher(client_for(fake), tmp_path / "m.json").publish(
+            backlog, opts(story_type="Task"), dry_run=False)
+
+    fake.issue_types = DEFAULT_HIERARCHY  # Feature type removed: auto must not switch modes
+    with pytest.raises(PublishError, match="does not exist"):
+        JiraPublisher(client_for(fake), tmp_path / "m.json").publish(
+            backlog, opts(), dry_run=False)
+
+    fake.issue_types = FULL_HIERARCHY
+    report = JiraPublisher(client_for(fake), tmp_path / "m.json").publish(
+        backlog, opts(), dry_run=False)
+    assert report.feature_mode == "issue-type" and len(fake.created) == 6
 
 
 def test_offline_preview_without_client(backlog_dict, tmp_path):

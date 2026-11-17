@@ -24,7 +24,7 @@ from ..integrations.jira import (
     JiraPublisher,
     PublishError,
     PublishOptions,
-    PublishReport,
+    PublishPlan,
 )
 from ..llm import ClaudeLLM, LLMError, StructuredLLM
 
@@ -187,8 +187,8 @@ def cmd_publish(args: argparse.Namespace, *, client: JiraClient | None = None,
     publisher = JiraPublisher(client, store.path("jira-manifest.json"), events=store.events)
 
     try:
-        preview = publisher.publish(backlog, opts, dry_run=True)
-        _print_plan(preview, out)
+        plan = publisher.prepare(backlog, opts)
+        _print_plan(plan, out)
         if not args.apply:
             print("\nDry run: nothing was created. Add --apply to create these issues.", file=out)
             return EXIT_OK
@@ -196,25 +196,27 @@ def cmd_publish(args: argparse.Namespace, *, client: JiraClient | None = None,
         approver = args.approver or getpass.getuser()
         if not args.yes:
             print(f"\nType the project key ({args.project}) to create "
-                  f"{len(preview.planned)} issues: ", end="", file=out, flush=True)
+                  f"{len(plan.issues)} issues: ", end="", file=out, flush=True)
             if stdin.readline().strip() != args.project:
                 print("Not confirmed. Nothing was created.", file=out)
                 return EXIT_BLOCKED
         store.events.append("intake.approved", actor=f"human:{approver}",
                             payload={"project": args.project, "backlog_digest": current,
-                                     "issues": len(preview.planned)})
-        report = publisher.publish(backlog, opts, dry_run=False)
+                                     "plan_digest": plan.digest, "issues": len(plan.issues)})
+        report = publisher.execute(plan)  # exactly the plan shown and approved
     except (PublishError, JiraError) as exc:
         store.events.append("jira.failed", actor="system:jira-publisher",
                             payload={"error": str(exc)})
         print(f"Publish failed: {exc}", file=out)
-        print("Issues created so far are saved in jira-manifest.json; re-run to resume.",
-              file=out)
+        if args.apply:
+            print("Issues created so far are saved in jira-manifest.json; re-run to resume.",
+                  file=out)
         return EXIT_ERROR
 
     print(f"\nCreated {len(report.created)} issue(s); "
-          f"{len(report.skipped)} already existed.", file=out)
-    for local_id, key in {**report.skipped, **report.created}.items():
+          f"{len(report.skipped)} already existed; "
+          f"{len(report.reconciled)} recovered after an uncertain write.", file=out)
+    for local_id, key in {**report.skipped, **report.reconciled, **report.created}.items():
         print(f"  {local_id:<10} {key}", file=out)
     return EXIT_OK
 
@@ -234,17 +236,17 @@ def _planned_digest(store: RunStore) -> str | None:
     return found
 
 
-def _print_plan(report: PublishReport, out: TextIO) -> None:
-    for w in report.warnings:
+def _print_plan(plan: PublishPlan, out: TextIO) -> None:
+    for w in plan.warnings:
         print(f"Note: {w}", file=out)
     counts: dict[str, int] = {}
-    for issue in report.planned:
+    for issue in plan.issues:
         counts[issue.issue_type] = counts.get(issue.issue_type, 0) + 1
     summary = ", ".join(f"{n} {t}" for t, n in counts.items())
-    print(f"Plan ({report.feature_mode} mode): {summary}", file=out)
-    for issue in report.planned:
+    print(f"Plan ({plan.feature_mode} mode, project {plan.project_key}): {summary}", file=out)
+    for issue in plan.issues:
         indent = {"epic": "", "feature": "  ", "story": "    "}[issue.level]
-        if report.feature_mode == "label" and issue.level == "story":
+        if plan.feature_mode == "label" and issue.level == "story":
             indent = "  "
         pts = f" [{issue.story_points}]" if issue.story_points else ""
         print(f"  {indent}{issue.local_id:<9} {issue.issue_type:<8} {issue.summary}{pts}",

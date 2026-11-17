@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from typing import Any
 
 import httpx
@@ -108,15 +109,32 @@ class FakeLLM:
 
 
 class FakeJira:
-    """In-memory Jira Cloud REST API v3 behind httpx.MockTransport."""
+    """In-memory Jira Cloud REST API v3 behind httpx.MockTransport.
 
-    def __init__(self, issue_types: list[dict[str, Any]], fail_after: int | None = None,
-                 throttle_first: bool = False):
+    `post_script` scripts successive POST /issue calls (default "ok" once it runs out):
+      ok            create the issue, 201
+      429           throttled, nothing created
+      400           validation error, nothing created
+      504           gateway timeout, nothing created
+      commit_504    issue IS created, then the gateway returns 504
+      commit_reset  issue IS created, then the connection drops (ReadTimeout)
+      connect_error connection refused before the request reached Jira
+    `get_script` scripts GET /project calls: ok, 503, read_timeout.
+    """
+
+    def __init__(self, issue_types: list[dict[str, Any]], post_script: list[str] | None = None,
+                 get_script: list[str] | None = None):
         self.issue_types = issue_types
         self.created: list[dict[str, Any]] = []
-        self.fail_after = fail_after
-        self.throttle_first = throttle_first
+        self.post_script = list(post_script or [])
+        self.get_script = list(get_script or [])
         self.requests: list[httpx.Request] = []
+
+    def _create(self, request: httpx.Request) -> str:
+        fields = json.loads(request.content)["fields"]
+        key = f"CLM-{len(self.created) + 1}"
+        self.created.append({"key": key, **fields})
+        return key
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -124,16 +142,34 @@ class FakeJira:
         if path == "/rest/api/3/myself":
             return httpx.Response(200, json={"accountId": "abc"})
         if path.startswith("/rest/api/3/project/"):
+            action = self.get_script.pop(0) if self.get_script else "ok"
+            if action == "503":
+                return httpx.Response(503, text="Service Unavailable")
+            if action == "read_timeout":
+                raise httpx.ReadTimeout("timed out", request=request)
             return httpx.Response(200, json={"key": "CLM", "issueTypes": self.issue_types})
+        if path == "/rest/api/3/search/jql" and request.method == "POST":
+            body = json.loads(request.content)
+            label = re.search(r'labels = "([^"]+)"', body["jql"]).group(1)
+            hits = [{"key": i["key"], "fields": {"summary": i["summary"],
+                                                 "issuetype": i["issuetype"]}}
+                    for i in self.created if label in i.get("labels", [])]
+            return httpx.Response(200, json={"issues": hits, "isLast": True})
         if path == "/rest/api/3/issue" and request.method == "POST":
-            if self.throttle_first:
-                self.throttle_first = False
+            action = self.post_script.pop(0) if self.post_script else "ok"
+            if action == "429":
                 return httpx.Response(429, headers={"Retry-After": "1"})
-            if self.fail_after is not None and len(self.created) >= self.fail_after:
-                return httpx.Response(500, json={"errorMessages": ["boom"]})
-            fields = json.loads(request.content)["fields"]
-            key = f"CLM-{len(self.created) + 1}"
-            self.created.append({"key": key, **fields})
+            if action == "400":
+                return httpx.Response(400, json={"errors": {"summary": "required"}})
+            if action == "504":
+                return httpx.Response(504, text="Gateway Timeout")
+            if action == "connect_error":
+                raise httpx.ConnectError("refused", request=request)
+            key = self._create(request)
+            if action == "commit_504":
+                return httpx.Response(504, text="Gateway Timeout")
+            if action == "commit_reset":
+                raise httpx.ReadTimeout("timed out", request=request)
             return httpx.Response(201, json={"key": key})
         return httpx.Response(404, json={"errorMessages": [f"no route {path}"]})
 

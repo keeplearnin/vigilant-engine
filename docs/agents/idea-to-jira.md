@@ -88,10 +88,22 @@ and the edit is recorded in the event log as a human change.
 Every issue gets the labels `ai-generated`, `vigilant-<run-id>` and `moscow-<priority>`.
 Stories also get `kind-<kind>`. Add more with `--label`.
 
+**What you approve is what runs.** `--apply` shows the plan, asks for the project key, and
+then creates exactly that plan. It does not re-check Jira and re-plan after you confirm.
+The approval event records the plan's digest.
+
 **Resuming.** Each created key is written to `jira-manifest.json` straight away. If a run
 fails halfway, run the same command again: existing issues are skipped, not duplicated.
-If `backlog.json` changed after a partial publish, the tool refuses to continue, so the two
-can't drift apart.
+A resume keeps the project, issue types and feature mode of the first attempt. If
+`backlog.json` changed after a partial publish, the tool refuses to continue.
+
+**Retries never create duplicates.** Rate limits (429) and refused connections are retried,
+because Jira did not process those requests. When a create fails in a way where Jira
+*might* have saved the issue (a 5xx error, a timeout, or a dropped connection), the tool
+does not retry. It marks the issue as uncertain and stops. Run the same command again after
+a minute: it searches Jira for issues with the run's label, adopts the issue if it was
+created, or creates it if not. If it finds more than one match, it stops and names them so
+you can delete the duplicates.
 
 ## Run folder
 

@@ -1,19 +1,29 @@
 """Publish an approved backlog to Jira as Epic -> Feature -> Story issues.
 
+Two steps, so that what a person approves is exactly what runs:
+
+1. `prepare()` connects, checks issue types and hierarchy, and builds a `PublishPlan`.
+   It writes nothing.
+2. `execute(plan)` creates the issues in that plan. It does not re-plan.
+
 Safety properties:
-* Dry run by default. Nothing is written unless the caller passes ``dry_run=False``.
-* Preflight checks that the issue types exist and that the project's hierarchy allows the
-  parent links, before the first write.
 * A hard cap on issues per run.
-* Resumable: every created key is saved to a manifest straight away, so a failed run can be
-  re-run without creating duplicates. A changed backlog cannot resume a partial publish.
+* Resumable without duplicates: each created key is saved to a manifest straight away.
+  The manifest also pins the project, feature mode and issue types, and a changed backlog
+  cannot resume a partial publish.
+* Ambiguous writes are never retried blindly. If Jira may have created an issue but the
+  response was lost, the issue is recorded as uncertain and the run stops. The next run
+  waits for Jira's search index, looks for the issue by the run label, and either adopts it
+  or creates it.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -21,10 +31,12 @@ from ...evidence import EventLog, digest
 from ...intake.models import Backlog, Epic, Feature, Story
 from ...intake.render import display_ids
 from . import adf
-from .client import JiraClient
+from .client import JiraAmbiguousWriteError, JiraClient
 
 FeatureMode = Literal["auto", "issue-type", "label"]
+ResolvedMode = Literal["issue-type", "label"]
 DEFAULT_LEVELS = {"epic": 1, "story": 0}
+SEARCH_SETTLE_SECONDS = 60
 
 
 class PublishError(RuntimeError):
@@ -43,6 +55,9 @@ class PublishOptions:
     extra_labels: tuple[str, ...] = ()
     max_issues: int = 150
 
+    def issue_types(self) -> dict[str, str]:
+        return {"epic": self.epic_type, "feature": self.feature_type, "story": self.story_type}
+
 
 @dataclass
 class PlannedIssue:
@@ -58,22 +73,48 @@ class PlannedIssue:
 
 
 @dataclass
+class PublishPlan:
+    """Exactly what will be created. Built by `prepare()`, approved, then executed."""
+
+    project_key: str
+    run_id: str
+    run_label: str
+    feature_mode: ResolvedMode
+    issue_types: dict[str, str]
+    story_points_field: str | None
+    backlog_digest: str
+    issues: list[PlannedIssue]
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def digest(self) -> str:
+        return digest({
+            "project": self.project_key,
+            "mode": self.feature_mode,
+            "issue_types": self.issue_types,
+            "story_points_field": self.story_points_field,
+            "issues": [asdict(i) for i in self.issues],
+        })
+
+
+@dataclass
 class PublishReport:
-    feature_mode: Literal["issue-type", "label"]
+    feature_mode: ResolvedMode
     planned: list[PlannedIssue]
     created: dict[str, str] = field(default_factory=dict)
     skipped: dict[str, str] = field(default_factory=dict)
+    reconciled: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     dry_run: bool = True
 
 
 def resolve_feature_mode(
     project: dict[str, Any] | None, opts: PublishOptions
-) -> tuple[Literal["issue-type", "label"], list[str]]:
+) -> tuple[ResolvedMode, list[str]]:
     """Decide whether features become their own issues or labels on stories."""
     warnings: list[str] = []
     if project is None:  # offline dry run
-        mode = "label" if opts.feature_mode == "label" else "issue-type"
+        mode: ResolvedMode = "label" if opts.feature_mode == "label" else "issue-type"
         warnings.append("Preflight skipped (no Jira connection); hierarchy not verified.")
         return mode, warnings
 
@@ -127,12 +168,14 @@ def resolve_feature_mode(
     return "label", warnings
 
 
-def plan_issues(
-    backlog: Backlog, opts: PublishOptions, mode: Literal["issue-type", "label"]
-) -> list[PlannedIssue]:
+def run_label(run_id: str) -> str:
+    return _label(f"vigilant-{run_id}")
+
+
+def plan_issues(backlog: Backlog, opts: PublishOptions, mode: ResolvedMode) -> list[PlannedIssue]:
     ids = display_ids(backlog)
     titles = {s.ref: s.title for _, _, s in backlog.iter_stories()}
-    base_labels = [_label("ai-generated"), _label(f"vigilant-{opts.run_id}")]
+    base_labels = [_label("ai-generated"), run_label(opts.run_id)]
     base_labels += [_label(x) for x in opts.extra_labels]
     issues: list[PlannedIssue] = []
 
@@ -172,41 +215,62 @@ def plan_issues(
 
 
 class JiraPublisher:
-    def __init__(self, client: JiraClient | None, manifest_path: Path,
-                 events: EventLog | None = None):
+    def __init__(
+        self,
+        client: JiraClient | None,
+        manifest_path: Path,
+        events: EventLog | None = None,
+        *,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        settle_seconds: int = SEARCH_SETTLE_SECONDS,
+    ):
         self.client = client
         self.manifest_path = manifest_path
         self.events = events
+        self.clock = clock
+        self.settle_seconds = settle_seconds
 
-    def publish(self, backlog: Backlog, opts: PublishOptions, *, dry_run: bool = True
-                ) -> PublishReport:
+    # --- step 1: plan (no writes) ---------------------------------------------------------
+
+    def prepare(self, backlog: Backlog, opts: PublishOptions) -> PublishPlan:
+        opts = self._pin_to_manifest(opts)
         project = None
         if self.client is not None:
             self.client.myself()  # fails fast on bad credentials
             project = self.client.get_project(opts.project_key)
         mode, warnings = resolve_feature_mode(project, opts)
-        planned = plan_issues(backlog, opts, mode)
-        if len(planned) > opts.max_issues:
-            raise PublishError(f"{len(planned)} issues planned; the per-run cap is "
+        issues = plan_issues(backlog, opts, mode)
+        if len(issues) > opts.max_issues:
+            raise PublishError(f"{len(issues)} issues planned; the per-run cap is "
                                f"{opts.max_issues}. Raise --max-issues deliberately if needed.")
+        plan = PublishPlan(
+            project_key=opts.project_key, run_id=opts.run_id, run_label=run_label(opts.run_id),
+            feature_mode=mode, issue_types=opts.issue_types(),
+            story_points_field=opts.story_points_field,
+            backlog_digest=digest(backlog.model_dump()), issues=issues, warnings=warnings,
+        )
+        self._emit("jira.planned", {"project": plan.project_key, "mode": mode,
+                                    "issues": len(issues), "plan_digest": plan.digest})
+        return plan
 
-        report = PublishReport(feature_mode=mode, planned=planned, warnings=warnings,
-                               dry_run=dry_run)
-        if dry_run:
-            self._emit("jira.dry_run", {"project": opts.project_key, "mode": mode,
-                                        "planned": len(planned)})
-            return report
+    # --- step 2: execute the approved plan --------------------------------------------------
+
+    def execute(self, plan: PublishPlan) -> PublishReport:
         if self.client is None:
             raise PublishError("A Jira connection is required to publish.")
-
-        manifest = self._load_manifest(backlog, opts)
+        report = PublishReport(feature_mode=plan.feature_mode, planned=plan.issues,
+                               warnings=list(plan.warnings), dry_run=False)
+        manifest = self._load_manifest(plan)
+        report.reconciled = self._reconcile(manifest, plan)
         keys: dict[str, str] = dict(manifest["created"])
-        for issue in planned:
+
+        for issue in plan.issues:
             if issue.local_id in keys:
-                report.skipped[issue.local_id] = keys[issue.local_id]
+                if issue.local_id not in report.reconciled:
+                    report.skipped[issue.local_id] = keys[issue.local_id]
                 continue
             fields: dict[str, Any] = {
-                "project": {"key": opts.project_key},
+                "project": {"key": plan.project_key},
                 "issuetype": {"name": issue.issue_type},
                 "summary": issue.summary,
                 "description": issue.description,
@@ -214,9 +278,24 @@ class JiraPublisher:
             }
             if issue.parent_local_id:
                 fields["parent"] = {"key": keys[issue.parent_local_id]}
-            if opts.story_points_field and issue.story_points is not None:
-                fields[opts.story_points_field] = issue.story_points
-            key = self.client.create_issue(fields)
+            if plan.story_points_field and issue.story_points is not None:
+                fields[plan.story_points_field] = issue.story_points
+            try:
+                key = self.client.create_issue(fields)
+            except JiraAmbiguousWriteError as exc:
+                manifest["uncertain"][issue.local_id] = {
+                    "summary": issue.summary,
+                    "issue_type": issue.issue_type,
+                    "at": self.clock().isoformat(),
+                }
+                self._save_manifest(manifest)
+                self._emit("jira.write_uncertain", {"local_id": issue.local_id,
+                                                    "error": str(exc)})
+                raise PublishError(
+                    f"Jira may or may not have created {issue.local_id} '{issue.summary}' "
+                    f"({exc}). Wait a minute, then run the same command again: it will look "
+                    "for the issue in Jira and continue without creating a duplicate."
+                ) from exc
             keys[issue.local_id] = key
             report.created[issue.local_id] = key
             manifest["created"][issue.local_id] = key
@@ -225,22 +304,113 @@ class JiraPublisher:
                                               "type": issue.issue_type})
         return report
 
-    # ------------------------------------------------------------------------------
-    def _load_manifest(self, backlog: Backlog, opts: PublishOptions) -> dict[str, Any]:
-        backlog_digest = digest(backlog.model_dump())
-        if self.manifest_path.exists():
-            manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-            if manifest["project"] != opts.project_key:
-                raise PublishError(f"This run was already published to {manifest['project']}.")
-            if manifest["backlog_digest"] != backlog_digest and manifest["created"]:
+    def publish(self, backlog: Backlog, opts: PublishOptions, *, dry_run: bool = True
+                ) -> PublishReport:
+        """Prepare and, unless `dry_run`, execute in one call."""
+        plan = self.prepare(backlog, opts)
+        if dry_run:
+            return PublishReport(feature_mode=plan.feature_mode, planned=plan.issues,
+                                 warnings=plan.warnings, dry_run=True)
+        return self.execute(plan)
+
+    # --- manifest ----------------------------------------------------------------------------
+
+    def _read_manifest(self) -> dict[str, Any] | None:
+        if not self.manifest_path.exists():
+            return None
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        manifest.setdefault("uncertain", {})
+        return manifest
+
+    @staticmethod
+    def _started(manifest: dict[str, Any] | None) -> bool:
+        return bool(manifest and (manifest["created"] or manifest["uncertain"]))
+
+    def _pin_to_manifest(self, opts: PublishOptions) -> PublishOptions:
+        """A partly published run must resume with the same project, types and mode."""
+        manifest = self._read_manifest()
+        if not self._started(manifest):
+            return opts
+        assert manifest is not None
+        if manifest["project"] != opts.project_key:
+            raise PublishError(f"This run was already published to {manifest['project']}.")
+        pinned_types = manifest.get("issue_types")
+        if pinned_types and pinned_types != opts.issue_types():
+            raise PublishError(
+                f"This run was partly published with issue types {pinned_types}; "
+                "use the same --epic-type, --feature-type and --story-type."
+            )
+        pinned_mode = manifest.get("feature_mode")
+        if pinned_mode and opts.feature_mode not in ("auto", pinned_mode):
+            raise PublishError(
+                f"This run was partly published in {pinned_mode} mode; resume with "
+                f"--feature-mode {pinned_mode} (or auto)."
+            )
+        return replace(opts, feature_mode=pinned_mode) if pinned_mode else opts
+
+    def _load_manifest(self, plan: PublishPlan) -> dict[str, Any]:
+        manifest = self._read_manifest()
+        if not self._started(manifest):
+            return {
+                "project": plan.project_key, "run_id": plan.run_id,
+                "backlog_digest": plan.backlog_digest, "feature_mode": plan.feature_mode,
+                "issue_types": plan.issue_types, "created": {}, "uncertain": {},
+            }
+        assert manifest is not None
+        if manifest["project"] != plan.project_key:
+            raise PublishError(f"This run was already published to {manifest['project']}.")
+        if manifest["backlog_digest"] != plan.backlog_digest:
+            raise PublishError(
+                "The backlog changed after a partial publish. Resolve the issues already "
+                "created (see jira-manifest.json) before publishing again."
+            )
+        if manifest.get("feature_mode", plan.feature_mode) != plan.feature_mode:
+            raise PublishError("The plan's feature mode differs from the partial publish.")
+        return manifest
+
+    def _reconcile(self, manifest: dict[str, Any], plan: PublishPlan) -> dict[str, str]:
+        """Resolve writes whose outcome was unknown, by searching Jira for them."""
+        uncertain: dict[str, dict[str, str]] = manifest["uncertain"]
+        if not uncertain:
+            return {}
+        now = self.clock()
+        for local_id, record in uncertain.items():
+            waited = (now - datetime.fromisoformat(record["at"])).total_seconds()
+            if waited < self.settle_seconds:
                 raise PublishError(
-                    "The backlog changed after a partial publish. Resolve the issues already "
-                    "created (see jira-manifest.json) before publishing again."
+                    f"{local_id} was written moments ago with an unknown outcome. Wait "
+                    f"{int(self.settle_seconds - waited) + 1} more seconds so Jira's search "
+                    "index catches up, then run again."
                 )
-            manifest["backlog_digest"] = backlog_digest
-            return manifest
-        return {"project": opts.project_key, "run_id": opts.run_id,
-                "backlog_digest": backlog_digest, "created": {}}
+        assert self.client is not None
+        found = self.client.search_issues(
+            f'project = "{plan.project_key}" AND labels = "{plan.run_label}"',
+            ["summary", "issuetype"],
+        )
+        known = set(manifest["created"].values())
+        adopted: dict[str, str] = {}
+        for local_id, record in list(uncertain.items()):
+            matches = [
+                i["key"] for i in found
+                if i["key"] not in known
+                and i.get("fields", {}).get("summary") == record["summary"]
+                and i.get("fields", {}).get("issuetype", {}).get("name") == record["issue_type"]
+            ]
+            if len(matches) > 1:
+                raise PublishError(
+                    f"{local_id} '{record['summary']}' matches several issues in Jira "
+                    f"({', '.join(sorted(matches))}). Delete the duplicates, then run again."
+                )
+            if matches:
+                manifest["created"][local_id] = matches[0]
+                known.add(matches[0])
+                adopted[local_id] = matches[0]
+                self._emit("jira.issue_reconciled", {"local_id": local_id, "key": matches[0]})
+            else:
+                self._emit("jira.uncertain_not_created", {"local_id": local_id})
+            del uncertain[local_id]
+            self._save_manifest(manifest)
+        return adopted
 
     def _save_manifest(self, manifest: dict[str, Any]) -> None:
         tmp = self.manifest_path.with_suffix(".tmp")
