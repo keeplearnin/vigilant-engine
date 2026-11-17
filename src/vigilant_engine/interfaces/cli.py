@@ -9,11 +9,16 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import TextIO
 
-from ..evidence import RunStore, digest
+import anthropic
+from pydantic import ValidationError
+
+from ..evidence import EvidenceError, RunStore, digest
 from ..intake import Backlog, BacklogPlanner, IdeaBrief, Limits, PlannerError, lint
 from ..intake.quality import has_errors
 from ..intake.render import to_markdown
@@ -95,15 +100,22 @@ def cmd_plan(args: argparse.Namespace, *, llm: StructuredLLM | None = None,
 
     limits = Limits(args.max_epics, args.max_features_per_epic, args.max_stories_per_feature,
                     args.max_total_issues)
+    if llm is None:
+        try:  # before the run folder exists, so a bad setup leaves nothing behind
+            llm = ClaudeLLM(provider=args.provider, model=args.model,
+                            aws_region=args.aws_region)
+        except (LLMError, anthropic.AnthropicError) as exc:
+            print(f"Cannot reach Claude: {exc}", file=out)
+            return EXIT_ERROR
     store = RunStore(args.runs_dir)
-    llm = llm or ClaudeLLM(provider=args.provider, model=args.model, aws_region=args.aws_region)
     planner = BacklogPlanner(llm, limits=limits, effort=args.effort, events=store.events)
     brief = IdeaBrief(idea=idea, context=context)
 
     store.write_text("idea.md", idea)
+    store.write_json("limits.json", asdict(limits))
     store.events.append("run.started", actor=f"human:{getpass.getuser()}",
                         payload={"idea_digest": digest(idea.encode()), "model": llm.model,
-                                 "limits": limits.__dict__})
+                                 "limits": asdict(limits)})
     print(f"Run {store.run_id}: planning with {llm.model}...", file=out)
 
     try:
@@ -120,9 +132,12 @@ def cmd_plan(args: argparse.Namespace, *, llm: StructuredLLM | None = None,
             store.events.append("intake.clarified", actor=f"human:{getpass.getuser()}",
                                 payload={"answers": answers})
         result = planner.plan(brief)
-    except (LLMError, PlannerError) as exc:
-        store.events.append("run.failed", actor="system:intake", payload={"error": str(exc)})
-        print(f"Planning failed: {exc}", file=out)
+    except (LLMError, PlannerError, anthropic.AnthropicError) as exc:
+        message = _claude_error_message(exc)
+        store.events.append("run.failed", actor="system:intake",
+                            payload={"error": message, "kind": type(exc).__name__})
+        print(f"Planning failed: {message}", file=out)
+        print(f"Partial run kept for the record: {store.dir}", file=out)
         return EXIT_ERROR
 
     store.write_json("brief.json", brief.model_dump())
@@ -157,9 +172,20 @@ def cmd_plan(args: argparse.Namespace, *, llm: StructuredLLM | None = None,
 
 def cmd_publish(args: argparse.Namespace, *, client: JiraClient | None = None,
                 stdin: TextIO = sys.stdin, out: TextIO = sys.stdout) -> int:
-    store = RunStore.open(args.run)
-    backlog = Backlog.model_validate(store.read_json("backlog.json"))
-    findings = lint(backlog)
+    try:
+        store = RunStore.open(args.run)
+        backlog = Backlog.model_validate_json(
+            store.path("backlog.json").read_text(encoding="utf-8"))
+        limits = _load_limits(store)
+    except FileNotFoundError as exc:
+        print(f"Not found: {exc.filename or exc}. Check the --run folder.", file=out)
+        return EXIT_ERROR
+    except (ValidationError, json.JSONDecodeError) as exc:
+        print("backlog.json is not a valid backlog. Fix these problems and try again:",
+              file=out)
+        print(_validation_summary(exc), file=out)
+        return EXIT_BLOCKED
+    findings = lint(backlog, limits)
     if has_errors(findings):
         for f in findings:
             if f.severity == "error":
@@ -226,18 +252,48 @@ def cmd_publish(args: argparse.Namespace, *, client: JiraClient | None = None,
 
 
 def _planned_digest(store: RunStore) -> str | None:
-    import json
-
-    path = store.events.path
-    if not path.exists():
-        return None
     found = None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            event = json.loads(line)
-            if event["type"] == "intake.planned":
-                found = event["payload"]["backlog_digest"]
+    for event in store.events.events():
+        if event.get("type") == "intake.planned":
+            found = event.get("payload", {}).get("backlog_digest")
     return found
+
+
+def _load_limits(store: RunStore) -> Limits:
+    """The limits the run was planned with, so publish judges it by the same rules."""
+    path = store.path("limits.json")
+    if not path.exists():
+        return Limits()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    known = {k: int(v) for k, v in data.items() if k in Limits.__dataclass_fields__}
+    return Limits(**known)
+
+
+def _validation_summary(exc: Exception) -> str:
+    if isinstance(exc, ValidationError):
+        lines = []
+        for err in exc.errors()[:10]:
+            where = ".".join(str(p) for p in err["loc"]) or "backlog"
+            lines.append(f"  {where}: {err['msg']}")
+        more = len(exc.errors()) - 10
+        if more > 0:
+            lines.append(f"  ... and {more} more")
+        return "\n".join(lines)
+    if isinstance(exc, json.JSONDecodeError):
+        return f"  line {exc.lineno}, column {exc.colno}: {exc.msg}"
+    return f"  {exc}"
+
+
+def _claude_error_message(exc: Exception) -> str:
+    if isinstance(exc, anthropic.AuthenticationError):
+        return "Claude rejected the API credentials. Check ANTHROPIC_API_KEY or `ant auth login`."
+    if isinstance(exc, anthropic.RateLimitError):
+        return "Claude rate limit reached. Wait a minute and run plan again."
+    if isinstance(exc, anthropic.APIStatusError) and exc.status_code >= 500:
+        return f"Claude is temporarily unavailable ({exc.status_code}). Try again shortly."
+    if isinstance(exc, anthropic.APIConnectionError):
+        return "Could not connect to Claude. Check the network and try again."
+    return str(exc)
 
 
 def _print_plan(plan: PublishPlan, out: TextIO) -> None:
@@ -261,21 +317,19 @@ def _print_plan(plan: PublishPlan, out: TextIO) -> None:
 
 def cmd_import(args: argparse.Namespace, out: TextIO = sys.stdout) -> int:
     """Run a hand-written backlog through the same gate, review files and evidence trail."""
-    import json
-
-    from pydantic import ValidationError
-
     try:
         backlog = Backlog.model_validate_json(args.backlog_file.read_text(encoding="utf-8"))
     except FileNotFoundError:
         print(f"File not found: {args.backlog_file}", file=out)
         return EXIT_ERROR
     except (ValidationError, json.JSONDecodeError) as exc:
-        print(f"{args.backlog_file} is not a valid backlog:\n{exc}", file=out)
+        print(f"{args.backlog_file} is not a valid backlog:\n{_validation_summary(exc)}",
+              file=out)
         return EXIT_ERROR
 
     findings = lint(backlog)
     store = RunStore(args.runs_dir)
+    store.write_json("limits.json", asdict(Limits()))
     author = f"human:{getpass.getuser()}"
     store.events.append("run.started", actor=author,
                         payload={"source": "import", "file": str(args.backlog_file)})
@@ -302,7 +356,12 @@ def cmd_import(args: argparse.Namespace, out: TextIO = sys.stdout) -> int:
 # --- verify ------------------------------------------------------------------------------
 
 def cmd_verify(args: argparse.Namespace, out: TextIO = sys.stdout) -> int:
-    ok, message = RunStore.open(args.run).events.verify()
+    try:
+        store = RunStore.open(args.run)
+    except FileNotFoundError as exc:
+        print(str(exc), file=out)
+        return EXIT_ERROR
+    ok, message = store.events.verify()
     print(message, file=out)
     return EXIT_OK if ok else EXIT_ERROR
 
@@ -311,7 +370,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     handlers = {"plan": cmd_plan, "publish": cmd_publish, "import": cmd_import,
                 "verify": cmd_verify}
-    return handlers[args.command](args)
+    try:
+        return handlers[args.command](args)
+    except EvidenceError as exc:
+        print(f"Stopped: {exc}\nRun `vigilant intake verify --run <folder>` for details.")
+        return EXIT_ERROR
 
 
 if __name__ == "__main__":
