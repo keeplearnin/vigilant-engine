@@ -55,6 +55,21 @@ Enterprise deployment example: [`docs/engagements/the-hartford/`](docs/engagemen
 
 ---
 
+## Agents
+
+| Agent | Status | What it does |
+|---|---|---|
+| [Idea-to-Jira intake](docs/agents/idea-to-jira.md) | Working, Jira Cloud | Turns a product idea into reviewed epics, features and stories, then creates them in Jira after human approval |
+
+```bash
+uv sync
+uv run vigilant intake plan --idea-file examples/ideas/claim-status-updates.md --interactive
+uv run vigilant intake publish --run runs/<run-id> --project CLAIMS          # dry run
+uv run vigilant intake publish --run runs/<run-id> --project CLAIMS --apply  # create issues
+uv run pytest
+```
+
 ## Status
 
-Architecture phase (M0 next). See the [roadmap](docs/architecture/ARCHITECTURE.md#19-delivery-roadmap).
+Architecture defined; the first agent (intake) is implemented. See the
+[roadmap](docs/architecture/ARCHITECTURE.md#19-delivery-roadmap).
