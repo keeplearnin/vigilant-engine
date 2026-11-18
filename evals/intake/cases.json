@@ -3,40 +3,82 @@
     "id": "password-reset-sms",
     "idea": "Automated Self-Service Password Reset via SMS",
     "expect": [
-      {"name": "session-revocation",
-       "pattern": "revok\\w*[^.]{0,80}(session|token)|(session|token)s?[^.]{0,80}revok|sign(ed|s)? out[^.]{0,40}(all|other|existing)"},
-      {"name": "enrolment-notification",
-       "pattern": "(first|initial|new)[^.]{0,40}enrol\\w*[^.]{0,120}notif|notif\\w*[^.]{0,120}(first|initial|new)[^.]{0,40}enrol"},
-      {"name": "cooling-off-period",
-       "pattern": "cool(ing)?[- ]off|waiting period|hold(ing)? period|grace period|not (be )?usable[^.]{0,60}hours"},
-      {"name": "breached-password-check",
-       "pattern": "breach\\w*[^.]{0,40}password|compromised password|known[- ]bad password|pwned"},
-      {"name": "final-step-guard",
-       "pattern": "(new password|set[- ]password|password step)[^.]{0,160}(without|skipp\\w*|bypass\\w*)[^.]{0,60}verif"},
-      {"name": "identical-responses-everywhere",
-       "pattern": "(identical|same|indistinguishable)[^.]{0,120}(resend|lockout|outage|error|every step)"}
+      {
+        "name": "session-revocation",
+        "pattern": "revok\\w*[^.]{0,80}(session|token)|(session|token)s?[^.]{0,80}revok|sign(ed|s)? out[^.]{0,40}(all|other|existing)"
+      },
+      {
+        "name": "enrolment-notification",
+        "pattern": "(first|initial|new)[^.]{0,40}enrol\\w*[^.]{0,120}notif|notif\\w*[^.]{0,120}(first|initial|new)[^.]{0,40}enrol"
+      },
+      {
+        "name": "cooling-off-period",
+        "pattern": "cool(ing)?[- ]off|waiting period|hold(ing)? period|grace period|not (be )?usable[^.]{0,60}hours"
+      },
+      {
+        "name": "breached-password-check",
+        "pattern": "breach\\w*[^.]{0,40}password|compromised password|known[- ]bad password|pwned"
+      },
+      {
+        "name": "final-step-guard",
+        "pattern": "(new password|set[- ]password|password step)[^.]{0,160}(without|skipp\\w*|bypass\\w*)[^.]{0,60}verif|(without|skipp\\w*|bypass\\w*)[^.]{0,60}verif\\w*[^.]{0,160}(new password|set[- ]password|password step)"
+      },
+      {
+        "name": "identical-responses-everywhere",
+        "pattern": "(identical|same|indistinguishable)[^.]{0,120}(resend|lockout|outage|error|every step)"
+      }
     ]
   },
   {
     "id": "claim-status-updates",
     "idea_file": "../../examples/ideas/claim-status-updates.md",
     "expect": [
-      {"name": "consent-capture", "pattern": "consent"},
-      {"name": "quiet-hours", "pattern": "quiet hours|time of day|between \\d{1,2}(:\\d{2})?\\s?(am|pm)|overnight|night"},
-      {"name": "accessibility", "pattern": "wcag|screen reader|accessib"},
-      {"name": "message-history", "pattern": "(history|timeline|record)[^.]{0,80}(sent|message|notification)"},
-      {"name": "opt-out", "pattern": "opt[- ]?out|unsubscribe|stop receiving|reply stop"}
+      {
+        "name": "consent-capture",
+        "pattern": "consent"
+      },
+      {
+        "name": "quiet-hours",
+        "pattern": "quiet hours|time of day|between \\d{1,2}(:\\d{2})?\\s?(am|pm)|overnight|night"
+      },
+      {
+        "name": "accessibility",
+        "pattern": "wcag|screen reader|accessib"
+      },
+      {
+        "name": "message-history",
+        "pattern": "(history|timeline|record)[^.]{0,80}(sent|message|notification)"
+      },
+      {
+        "name": "opt-out",
+        "pattern": "opt[- ]?out|unsubscribe|stop receiving|reply stop"
+      }
     ]
   },
   {
     "id": "address-change",
     "idea": "Let policyholders update their mailing address online and have it reflected on their policies, billing and documents.",
     "expect": [
-      {"name": "identity-verification", "pattern": "re-?authenticat|verif\\w*[^.]{0,40}identity|step-up"},
-      {"name": "notify-old-address", "pattern": "(old|previous|former) (address|contact)|confirmation[^.]{0,60}(email|text|sms)"},
-      {"name": "documents-reissued", "pattern": "reissu|regenerat|updated (document|declaration)|new declarations?"},
-      {"name": "rating-impact", "pattern": "premium|rat(e|ing) (change|impact)|underwriting|garaging"},
-      {"name": "audit-trail", "pattern": "audit"}
+      {
+        "name": "identity-verification",
+        "pattern": "re-?authenticat|verif\\w*[^.]{0,40}identity|step-up"
+      },
+      {
+        "name": "notify-old-address",
+        "pattern": "(old|previous|former) (address|contact)|confirmation[^.]{0,60}(email|text|sms)"
+      },
+      {
+        "name": "documents-reissued",
+        "pattern": "reissu|regenerat|updated (document|declaration)|new declarations?"
+      },
+      {
+        "name": "rating-impact",
+        "pattern": "premium|rat(e|ing) (change|impact)|underwriting|garaging"
+      },
+      {
+        "name": "audit-trail",
+        "pattern": "audit"
+      }
     ]
   }
 ]

@@ -19,6 +19,7 @@ Safety properties:
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from collections.abc import Callable
@@ -70,6 +71,8 @@ class PlannedIssue:
     labels: list[str]
     parent_local_id: str | None
     story_points: int | None = None
+    # (local_id, title) of the stories this one depends on; rewritten to Jira keys at execute
+    depends_on: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -227,8 +230,62 @@ def plan_issues(backlog: Backlog, opts: PublishOptions, mode: ResolvedMode) -> l
                     labels=_dedupe(labels),
                     parent_local_id=ids[feature.ref] if mode == "issue-type" else ids[epic.ref],
                     story_points=story.story_points,
+                    depends_on=[(ids[d], titles.get(d, "")) for d in story.depends_on
+                                if d in ids],
                 ))
     return issues
+
+
+def creation_order(issues: list[PlannedIssue]) -> list[PlannedIssue]:
+    """Epics, then features, then stories with each story after the stories it depends on,
+    so dependencies can be written as real Jira keys. Display order is unchanged."""
+    epics = [i for i in issues if i.level == "epic"]
+    features = [i for i in issues if i.level == "feature"]
+    stories = [i for i in issues if i.level == "story"]
+    pending = {s.local_id for s in stories}
+    ordered: list[PlannedIssue] = []
+    while stories:
+        ready = [s for s in stories if not any(d in pending for d, _ in s.depends_on)]
+        if not ready:  # a cycle (the quality gate blocks these); keep the remaining order
+            ready = stories
+        for s in ready:
+            ordered.append(s)
+            pending.discard(s.local_id)
+        stories = [s for s in stories if s not in ready]
+    return epics + features + ordered
+
+
+def finalize_description(issue: PlannedIssue, keys: dict[str, str],
+                         browse_url: Callable[[str], str], run_id: str,
+                         anchor: str | None) -> dict[str, Any]:
+    """Swap dependency IDs for linked Jira keys and add the approval anchor."""
+    doc = copy.deepcopy(issue.description)
+    replacements = {
+        f"{local} {title}".strip(): (keys[local], title)
+        for local, title in issue.depends_on if local in keys
+    }
+    if replacements:
+        _replace_dependency_text(doc, replacements, browse_url)
+    if anchor:
+        doc["content"].append(adf.paragraph(adf.text(
+            f"Approval record {anchor} (check with: vigilant intake verify --run "
+            f"runs/{run_id} --expect-head {anchor})", italic=True)))
+    return doc
+
+
+def _replace_dependency_text(node: Any, replacements: dict[str, tuple[str, str]],
+                             browse_url: Callable[[str], str]) -> None:
+    if isinstance(node, dict):
+        content = node.get("content")
+        if (node.get("type") == "paragraph" and isinstance(content, list) and len(content) == 1
+                and content[0].get("type") == "text" and content[0].get("text") in replacements):
+            key, title = replacements[content[0]["text"]]
+            link = {"type": "text", "text": key,
+                    "marks": [{"type": "link", "attrs": {"href": browse_url(key)}}]}
+            node["content"] = [link] + ([{"type": "text", "text": f" {title}"}] if title else [])
+            return
+        for child in content or []:
+            _replace_dependency_text(child, replacements, browse_url)
 
 
 class JiraPublisher:
@@ -272,7 +329,9 @@ class JiraPublisher:
 
     # --- step 2: execute the approved plan --------------------------------------------------
 
-    def execute(self, plan: PublishPlan) -> PublishReport:
+    def execute(self, plan: PublishPlan, *, anchor: str | None = None) -> PublishReport:
+        """Create the issues in `plan`. `anchor` (the approval event's hash) is written into
+        every created issue, so the run's evidence log can later be checked against Jira."""
         if self.client is None:
             raise PublishError("A Jira connection is required to publish.")
         report = PublishReport(feature_mode=plan.feature_mode, planned=plan.issues,
@@ -281,7 +340,7 @@ class JiraPublisher:
         report.reconciled = self._reconcile(manifest, plan)
         keys: dict[str, str] = dict(manifest["created"])
 
-        for issue in plan.issues:
+        for issue in creation_order(plan.issues):
             if issue.local_id in keys:
                 if issue.local_id not in report.reconciled:
                     report.skipped[issue.local_id] = keys[issue.local_id]
@@ -290,7 +349,8 @@ class JiraPublisher:
                 "project": {"key": plan.project_key},
                 "issuetype": {"name": issue.issue_type},
                 "summary": issue.summary,
-                "description": issue.description,
+                "description": finalize_description(issue, keys, self.client.browse_url,
+                                                    plan.run_id, anchor),
                 "labels": issue.labels,
             }
             if issue.parent_local_id:

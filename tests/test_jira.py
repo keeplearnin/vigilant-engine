@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -55,7 +56,9 @@ def test_creates_epic_feature_story_with_parents(backlog_dict, tmp_path):
     assert story["customfield_10016"] == 5
     assert {"ai-generated", "vigilant-run-1", "moscow-must", "kind-user"} <= set(story["labels"])
     assert story["description"]["type"] == "doc"
-    assert "S1.1.1 Story story-view-status" in json.dumps(story["description"])
+    view_key = by_summary["Story story-view-status"]["key"]
+    desc = json.dumps(story["description"])
+    assert "S1.1.1" not in desc and f"/browse/{view_key}" in desc  # linked Jira key
     assert len(report.created) == 6
     assert json.loads((tmp_path / "m.json").read_text())["created"]["S1.1.2"] == story["key"]
     assert events.verify()[0]
@@ -149,11 +152,11 @@ def test_ambiguous_write_that_committed_is_adopted_not_duplicated(
         publisher(fake, tmp_path, clock).publish(backlog, opts(), dry_run=False)
     assert len(fake.created) == 3  # the third POST was sent once, never retried
     manifest = json.loads((tmp_path / "m.json").read_text())
-    assert list(manifest["uncertain"]) == ["S1.1.1"]
+    assert list(manifest["uncertain"]) == ["F1.2"]  # epics, then features, then stories
 
     clock.advance(61)
     report = publisher(fake, tmp_path, clock).publish(backlog, opts(), dry_run=False)
-    assert report.reconciled == {"S1.1.1": "CLM-3"}
+    assert report.reconciled == {"F1.2": "CLM-3"}
     assert len(fake.created) == 6  # no duplicate
     assert json.loads((tmp_path / "m.json").read_text())["uncertain"] == {}
 
@@ -293,3 +296,36 @@ def test_missing_story_type_names_the_option(backlog_dict, tmp_path):
     pub = JiraPublisher(client_for(FakeJira(TEAM_MANAGED)), tmp_path / "m.json")
     with pytest.raises(PublishError, match="--story-type"):
         pub.publish(Backlog.model_validate(backlog_dict), opts())
+
+
+def test_dependencies_created_first_and_linked(backlog_dict, tmp_path):
+    data = copy.deepcopy(backlog_dict)
+    stories = data["epics"][0]["features"][0]["stories"]
+    stories[0]["depends_on"] = ["story-missing-docs"]  # first story now depends on the second
+    stories[1]["depends_on"] = []
+    data["epics"][0]["features"][1]["stories"][0]["depends_on"] = []
+    fake = FakeJira(FULL_HIERARCHY)
+    JiraPublisher(client_for(fake), tmp_path / "m.json").publish(
+        Backlog.model_validate(data), opts(), dry_run=False)
+    order = [i["summary"] for i in fake.created]
+    assert order.index("Story story-missing-docs") < order.index("Story story-view-status")
+    view = next(i for i in fake.created if i["summary"] == "Story story-view-status")
+    docs_key = next(i["key"] for i in fake.created if i["summary"] == "Story story-missing-docs")
+    assert f"https://example.atlassian.net/browse/{docs_key}" in json.dumps(view["description"])
+
+
+def test_approval_anchor_written_to_every_issue(backlog_dict, tmp_path):
+    fake = FakeJira(FULL_HIERARCHY)
+    pub = JiraPublisher(client_for(fake), tmp_path / "m.json")
+    plan = pub.prepare(Backlog.model_validate(backlog_dict), opts())
+    pub.execute(plan, anchor="sha256:" + "ab" * 32)
+    assert all("sha256:" + "ab" * 32 in json.dumps(i["description"]) for i in fake.created)
+
+
+def test_search_stops_on_repeated_page_token():
+    def handler(request):
+        return httpx.Response(200, json={"issues": [], "nextPageToken": "same", "isLast": False})
+    cfg = JiraConfig(base_url="https://example.atlassian.net", email="a@b.c", api_token="t")
+    client = JiraClient(cfg, transport=httpx.MockTransport(handler), sleep=lambda s: None)
+    with pytest.raises(JiraError, match="same page token"):
+        client.search_issues("project = X", ["summary"])

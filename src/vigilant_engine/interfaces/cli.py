@@ -34,7 +34,31 @@ from ..integrations.jira import (
 )
 from ..llm import ClaudeLLM, LLMError, StructuredLLM
 
-EXIT_OK, EXIT_BLOCKED, EXIT_ERROR = 0, 2, 1
+EXIT_OK, EXIT_BLOCKED, EXIT_ERROR, EXIT_INTERRUPTED = 0, 2, 1, 130
+
+
+def positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more")
+    return number
+
+
+def read_text_file(path: Path, what: str) -> str:
+    """Read a UTF-8 text file, turning common mistakes into one clear sentence."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise UserFacingError(f"The {what} {path} was not found.") from None
+    except IsADirectoryError:
+        raise UserFacingError(f"The {what} {path} is a folder, not a file.") from None
+    except UnicodeDecodeError:
+        raise UserFacingError(f"The {what} {path} is not UTF-8 text. Save it as UTF-8 "
+                              "(plain text or Markdown) and try again.") from None
+
+
+class UserFacingError(Exception):
+    """An input problem the user can fix; printed without a traceback."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,8 +71,9 @@ def build_parser() -> argparse.ArgumentParser:
     src = plan.add_mutually_exclusive_group(required=True)
     src.add_argument("--idea", help="The idea as text")
     src.add_argument("--idea-file", type=Path, help="File containing the idea")
-    plan.add_argument("--context-file", type=Path,
-                      help="Optional background: users, constraints, existing systems")
+    plan.add_argument("--context-file", type=Path, action="append", default=[],
+                      help="Background or standards file (repeatable; standards first). "
+                           "See docs/agents/context-guidelines.md")
     plan.add_argument("--interactive", action="store_true",
                       help="Answer up to 5 clarifying questions before planning")
     plan.add_argument("--runs-dir", type=Path, default=Path("runs"))
@@ -59,19 +84,23 @@ def build_parser() -> argparse.ArgumentParser:
                       default="high")
     plan.add_argument("--prompt-version", choices=sorted(PROMPTS), default=DEFAULT_PROMPT_VERSION,
                       help="System prompt version (for before/after comparisons)")
-    plan.add_argument("--max-epics", type=int, default=Limits.max_epics)
-    plan.add_argument("--max-features-per-epic", type=int, default=Limits.max_features_per_epic)
-    plan.add_argument("--max-stories-per-feature", type=int,
+    plan.add_argument("--max-epics", type=positive_int, default=Limits.max_epics)
+    plan.add_argument("--max-features-per-epic", type=positive_int,
+                      default=Limits.max_features_per_epic)
+    plan.add_argument("--max-stories-per-feature", type=positive_int,
                       default=Limits.max_stories_per_feature)
-    plan.add_argument("--max-total-issues", type=int, default=Limits.max_total_issues)
+    plan.add_argument("--max-total-issues", type=positive_int,
+                      default=Limits.max_total_issues)
 
     pub = cmds.add_parser("publish", help="Create the reviewed backlog in Jira")
     pub.add_argument("--run", type=Path, required=True, help="Run folder from 'intake plan'")
     pub.add_argument("--project", required=True, help="Jira project key, e.g. CLAIMS")
     pub.add_argument("--apply", action="store_true",
                      help="Create the issues. Without this flag nothing is written.")
-    pub.add_argument("--yes", action="store_true", help="Skip the typed confirmation")
-    pub.add_argument("--approver", default=None, help="Recorded as the approver (default: OS user)")
+    pub.add_argument("--yes", action="store_true",
+                     help="Skip the typed confirmation (requires --approver)")
+    pub.add_argument("--approver", default=None,
+                     help="Name recorded as the approver (default: your OS user name)")
     pub.add_argument("--feature-mode", choices=["auto", "issue-type", "label"], default="auto",
                      help="'label' when your project has no Feature issue type")
     pub.add_argument("--epic-type", default="Epic")
@@ -80,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     pub.add_argument("--story-points-field", default=None,
                      help="Custom field ID for story points, e.g. customfield_10016")
     pub.add_argument("--label", action="append", default=[], help="Extra label (repeatable)")
-    pub.add_argument("--max-issues", type=int, default=150)
+    pub.add_argument("--max-issues", type=positive_int, default=150)
 
     imp = cmds.add_parser("import", help="Start a run from a backlog JSON written by a person")
     imp.add_argument("--backlog-file", type=Path, required=True)
@@ -88,6 +117,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     ver = cmds.add_parser("verify", help="Verify a run's event log")
     ver.add_argument("--run", type=Path, required=True)
+    ver.add_argument("--expect-head", default=None,
+                     help="A record hash taken from elsewhere (e.g. a Jira issue footer) that "
+                          "must still be in the log")
     return parser
 
 
@@ -95,8 +127,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def cmd_plan(args: argparse.Namespace, *, llm: StructuredLLM | None = None,
              stdin: TextIO = sys.stdin, out: TextIO = sys.stdout) -> int:
-    idea = args.idea if args.idea else args.idea_file.read_text(encoding="utf-8")
-    context = args.context_file.read_text(encoding="utf-8") if args.context_file else ""
+    try:
+        idea = args.idea if args.idea else read_text_file(args.idea_file, "idea file")
+        context = "\n\n---\n\n".join(
+            read_text_file(path, "context file").strip() for path in args.context_file)
+    except UserFacingError as exc:
+        print(str(exc), file=out)
+        return EXIT_ERROR
     if not idea.strip():
         print("The idea is empty.", file=out)
         return EXIT_ERROR
@@ -111,8 +148,13 @@ def cmd_plan(args: argparse.Namespace, *, llm: StructuredLLM | None = None,
             print(f"Cannot reach Claude: {exc}", file=out)
             return EXIT_ERROR
     store = RunStore(args.runs_dir)
+
+    def save_attempt(attempt: int, backlog: Backlog, findings: list) -> None:
+        # written immediately, so a later failure or Ctrl+C never loses a paid draft
+        store.write_json(f"attempts/attempt-{attempt}.json", backlog.model_dump())
+
     planner = BacklogPlanner(llm, limits=limits, effort=args.effort, events=store.events,
-                             prompt_version=args.prompt_version)
+                             prompt_version=args.prompt_version, on_attempt=save_attempt)
     brief = IdeaBrief(idea=idea, context=context)
 
     store.write_text("idea.md", idea)
@@ -138,6 +180,12 @@ def cmd_plan(args: argparse.Namespace, *, llm: StructuredLLM | None = None,
             store.events.append("intake.clarified", actor=f"human:{getpass.getuser()}",
                                 payload={"answers": answers})
         result = planner.plan(brief)
+    except KeyboardInterrupt:
+        store.events.append("run.failed", actor=f"human:{getpass.getuser()}",
+                            payload={"error": "interrupted", "kind": "KeyboardInterrupt"})
+        print(f"\nStopped. Any drafts received so far are in {store.path('attempts')}.",
+              file=out)
+        return EXIT_INTERRUPTED
     except (LLMError, PlannerError, anthropic.AnthropicError) as exc:
         message = _claude_error_message(exc)
         store.events.append("run.failed", actor="system:intake",
@@ -156,12 +204,19 @@ def cmd_plan(args: argparse.Namespace, *, llm: StructuredLLM | None = None,
                         payload={"backlog_digest": planned_digest,
                                  "counts": result.backlog.counts(),
                                  "attempts": result.attempts,
+                                 "chosen_attempt": result.chosen_attempt,
+                                 "repair_error": result.repair_error,
                                  "publishable": result.publishable})
 
     c = result.backlog.counts()
     print(f"\n{result.backlog.product_name}: {c['epics']} epics, {c['features']} features, "
           f"{c['stories']} stories, {c['story_points']} points "
           f"({result.attempts} attempt(s)).", file=out)
+    if result.chosen_attempt != result.attempts:
+        print(f"Kept attempt {result.chosen_attempt}: it had the fewest quality-gate errors.",
+              file=out)
+    if result.repair_error:
+        print(f"Note: {result.repair_error}. The best draft so far was kept.", file=out)
     errors = [f for f in result.findings if f.severity == "error"]
     warnings = [f for f in result.findings if f.severity == "warning"]
     print(f"Quality gate: {len(errors)} error(s), {len(warnings)} warning(s).", file=out)
@@ -169,8 +224,10 @@ def cmd_plan(args: argparse.Namespace, *, llm: StructuredLLM | None = None,
     print(f"Edit if needed: {store.path('backlog.json')}", file=out)
     if errors:
         print("Blocked: fix the errors in backlog.json, then run publish.", file=out)
+        print(f"Evidence head: {store.events.head}", file=out)
         return EXIT_BLOCKED
     print(f"Next: vigilant intake publish --run {store.dir} --project <KEY>", file=out)
+    print(f"Evidence head: {store.events.head}", file=out)
     return EXIT_OK
 
 
@@ -178,6 +235,10 @@ def cmd_plan(args: argparse.Namespace, *, llm: StructuredLLM | None = None,
 
 def cmd_publish(args: argparse.Namespace, *, client: JiraClient | None = None,
                 stdin: TextIO = sys.stdin, out: TextIO = sys.stdout) -> int:
+    if args.yes and not args.approver:
+        print("--yes skips the typed confirmation, so name the approver with --approver.",
+              file=out)
+        return EXIT_ERROR
     try:
         store = RunStore.open(args.run)
         backlog = Backlog.model_validate_json(
@@ -205,6 +266,7 @@ def cmd_publish(args: argparse.Namespace, *, client: JiraClient | None = None,
         store.events.append("intake.backlog_edited", actor=f"human:{getpass.getuser()}",
                             payload={"from": planned, "to": current})
 
+    owns_client = client is None
     if client is None:
         try:
             client = JiraClient(JiraConfig.from_env())
@@ -213,6 +275,15 @@ def cmd_publish(args: argparse.Namespace, *, client: JiraClient | None = None,
                 print(f"Cannot connect to Jira: {exc}", file=out)
                 return EXIT_ERROR
             print(f"No Jira connection ({exc}). Showing an offline preview.", file=out)
+    try:
+        return _publish(args, store, backlog, current, client, stdin, out)
+    finally:
+        if owns_client and client is not None:
+            client.close()
+
+
+def _publish(args: argparse.Namespace, store: RunStore, backlog: Backlog, current: str,
+             client: JiraClient | None, stdin: TextIO, out: TextIO) -> int:
 
     opts = PublishOptions(
         project_key=args.project, run_id=store.run_id, epic_type=args.epic_type,
@@ -229,17 +300,24 @@ def cmd_publish(args: argparse.Namespace, *, client: JiraClient | None = None,
             print("\nDry run: nothing was created. Add --apply to create these issues.", file=out)
             return EXIT_OK
 
-        approver = args.approver or getpass.getuser()
+        os_user = getpass.getuser()
+        approver = args.approver or os_user
         if not args.yes:
             print(f"\nType the project key ({args.project}) to create "
                   f"{len(plan.issues)} issues: ", end="", file=out, flush=True)
             if stdin.readline().strip() != args.project:
                 print("Not confirmed. Nothing was created.", file=out)
                 return EXIT_BLOCKED
-        store.events.append("intake.approved", actor=f"human:{approver}",
-                            payload={"project": args.project, "backlog_digest": current,
-                                     "plan_digest": plan.digest, "issues": len(plan.issues)})
-        report = publisher.execute(plan)  # exactly the plan shown and approved
+        # Local CLI identity is self-asserted; record how approval was given so reviewers
+        # can weigh it. Service mode would take the approver from SSO instead.
+        approval = store.events.append(
+            "intake.approved", actor=f"human:{approver}",
+            payload={"project": args.project, "backlog_digest": current,
+                     "plan_digest": plan.digest, "issues": len(plan.issues),
+                     "method": "--yes flag" if args.yes else "typed project key",
+                     "os_user": os_user, "interactive": bool(stdin.isatty())})
+        # exactly the plan shown and approved; the approval hash goes into every issue
+        report = publisher.execute(plan, anchor=approval["hash"])
     except (PublishError, JiraError) as exc:
         store.events.append("jira.failed", actor="system:jira-publisher",
                             payload={"error": str(exc)})
@@ -254,6 +332,8 @@ def cmd_publish(args: argparse.Namespace, *, client: JiraClient | None = None,
           f"{len(report.reconciled)} recovered after an uncertain write.", file=out)
     for local_id, key in {**report.skipped, **report.reconciled, **report.created}.items():
         print(f"  {local_id:<10} {key}", file=out)
+    print(f"Approval record (also in each new issue): {approval['hash']}", file=out)
+    print(f"Evidence head: {store.events.head}", file=out)
     return EXIT_OK
 
 
@@ -356,6 +436,7 @@ def cmd_import(args: argparse.Namespace, out: TextIO = sys.stdout) -> int:
                 print(f"  error {f.ref}: {f.message}", file=out)
         return EXIT_BLOCKED
     print(f"Next: vigilant intake publish --run {store.dir} --project <KEY>", file=out)
+    print(f"Evidence head: {store.events.head}", file=out)
     return EXIT_OK
 
 
@@ -367,7 +448,7 @@ def cmd_verify(args: argparse.Namespace, out: TextIO = sys.stdout) -> int:
     except FileNotFoundError as exc:
         print(str(exc), file=out)
         return EXIT_ERROR
-    ok, message = store.events.verify()
+    ok, message = store.events.verify(expect_head=args.expect_head)
     print(message, file=out)
     return EXIT_OK if ok else EXIT_ERROR
 

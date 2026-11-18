@@ -26,6 +26,7 @@ from typing import Any
 import httpx
 
 READ_RETRY_STATUSES = {429, 502, 503, 504}
+MAX_SEARCH_PAGES = 50
 # Raised before the request reached Jira, so retrying cannot duplicate a write.
 NOT_SENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
 
@@ -85,9 +86,19 @@ class JiraClient:
         )
         self._max_retries = max_retries
         self._sleep = sleep
+        self._base_url = config.base_url.rstrip("/")
 
     def close(self) -> None:
         self._http.close()
+
+    def __enter__(self) -> JiraClient:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def browse_url(self, key: str) -> str:
+        return f"{self._base_url}/browse/{key}"
 
     # --- transport ---------------------------------------------------------------------
 
@@ -153,7 +164,8 @@ class JiraClient:
         """All issues matching `jql`, via the enhanced search endpoint (read-only POST)."""
         issues: list[dict[str, Any]] = []
         token: str | None = None
-        while True:
+        seen: set[str] = set()
+        for _ in range(MAX_SEARCH_PAGES):
             body: dict[str, Any] = {"jql": jql, "fields": fields, "maxResults": page_size}
             if token:
                 body["nextPageToken"] = token
@@ -162,6 +174,10 @@ class JiraClient:
             token = data.get("nextPageToken")
             if not token or data.get("isLast"):
                 return issues
+            if token in seen:
+                raise JiraError(0, "Jira search returned the same page token twice; stopping.")
+            seen.add(token)
+        raise JiraError(0, f"Jira search exceeded {MAX_SEARCH_PAGES} pages; narrow the query.")
 
 
 def _error_text(resp: httpx.Response) -> str:

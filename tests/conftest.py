@@ -95,14 +95,14 @@ class FakeLLM:
 
     model = "claude-opus-5-5"
 
-    def __init__(self, *answers: dict[str, Any] | Exception):
+    def __init__(self, *answers: dict[str, Any] | BaseException):
         self.answers = list(answers)
         self.requests: list[dict[str, Any]] = []
 
     def structured(self, **kwargs) -> LLMResult:
         self.requests.append(kwargs)
         answer = self.answers.pop(0)
-        if isinstance(answer, Exception):
+        if isinstance(answer, BaseException):
             raise answer
         return LLMResult(text=json.dumps(answer), model=self.model, stop_reason="end_turn",
                          usage={"input_tokens": 10, "output_tokens": 20})

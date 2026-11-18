@@ -19,6 +19,9 @@ Effort = Literal["low", "medium", "high", "xhigh", "max"]
 DEFAULT_MODEL = "claude-opus-5-5"
 BEDROCK_MODEL_PREFIX = "anthropic."
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+# Current Claude models allow 128K output tokens; adaptive thinking counts toward the cap,
+# and a large backlog at high effort can exceed 64K. Streaming keeps this within timeouts.
+DEFAULT_MAX_TOKENS = 128000
 
 
 class LLMError(RuntimeError):
@@ -48,7 +51,8 @@ class StructuredLLM(Protocol):
     model: str
 
     def structured(
-        self, *, system: str, prompt: str, schema: dict[str, Any], effort: Effort, max_tokens: int
+        self, *, system: str, prompt: str, schema: dict[str, Any], effort: Effort,
+        max_tokens: int, preamble: str | None = None,
     ) -> LLMResult: ...
 
 
@@ -89,13 +93,21 @@ class ClaudeLLM:
         prompt: str,
         schema: dict[str, Any],
         effort: Effort = "high",
-        max_tokens: int = 64000,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        preamble: str | None = None,
     ) -> LLMResult:
+        """`preamble` is material shared by several calls (the idea and its context). It is
+        sent as a separate, cached user block ahead of `prompt`."""
+        content: list[dict[str, Any]] = []
+        if preamble:
+            content.append({"type": "text", "text": preamble,
+                            "cache_control": {"type": "ephemeral"}})
+        content.append({"type": "text", "text": prompt})
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
             "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": content}],
             "thinking": {"type": "adaptive"},
             "output_config": {
                 "effort": effort,

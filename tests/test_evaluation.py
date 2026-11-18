@@ -9,7 +9,14 @@ from pathlib import Path
 import pytest
 
 from vigilant_engine.intake import Backlog, BacklogPlanner, IdeaBrief, lint, prompts
-from vigilant_engine.intake.evaluation import Expectation, compare, load_cases, main, score
+from vigilant_engine.intake.evaluation import (
+    Expectation,
+    backlog_text,
+    compare,
+    load_cases,
+    main,
+    score,
+)
 from vigilant_engine.interfaces.cli import build_parser, cmd_plan
 
 from .conftest import FakeLLM
@@ -138,3 +145,38 @@ def test_run_with_fake_model(tmp_path, backlog_dict):
     summary = json.loads((tmp_path / "v2/summary.json").read_text())
     assert summary["prompt_version"] == "v2" and "address-change" in summary["cases"]
     assert (tmp_path / "v2/address-change/metrics.json").exists()
+
+
+def test_expectations_cannot_span_fields(make_backlog):
+    def mutate(d):
+        stories = d["epics"][0]["features"][0]["stories"]
+        stories[0]["description"] = "A notification is sent to the handler"
+        stories[1]["title"] = "First enrolment of a new phone"
+    backlog = Backlog.model_validate(make_backlog(mutate))
+    pattern = r"notif\w*[^.]{0,200}(first|new)[^.]{0,40}enrol"
+    assert not Expectation("x", pattern).met(backlog_text(backlog))
+    assert Expectation("x", pattern).met(
+        "A notification is sent on first enrolment of a method.")
+
+
+def test_run_refuses_to_mix_results(tmp_path, backlog_dict):
+    common = ["--only", "address-change", "--yes", "--cases",
+              str(REPO / "evals/intake/cases.json"), "--results-dir", str(tmp_path)]
+    assert main(["run", "--label", "v2", *common], llm=FakeLLM(backlog_dict),
+                out=io.StringIO()) == 0
+    out = io.StringIO()
+    assert main(["run", "--label", "v2", *common], llm=FakeLLM(backlog_dict), out=out) == 1
+    assert "already has results" in out.getvalue()
+    (tmp_path / "v2" / "stale-case").mkdir()
+    (tmp_path / "v2" / "stale-case" / "metrics.json").write_text("{}")
+    assert main(["run", "--label", "v2", "--overwrite", *common], llm=FakeLLM(backlog_dict),
+                out=io.StringIO()) == 0
+    assert not (tmp_path / "v2" / "stale-case").exists()
+
+
+def test_unknown_only_case_is_explained(tmp_path):
+    out = io.StringIO()
+    assert main(["run", "--label", "x", "--only", "password-reset", "--yes",
+                 "--cases", str(REPO / "evals/intake/cases.json"),
+                 "--results-dir", str(tmp_path)], llm=FakeLLM(), out=out) == 1
+    assert "Unknown case id" in out.getvalue() and "password-reset-sms" in out.getvalue()

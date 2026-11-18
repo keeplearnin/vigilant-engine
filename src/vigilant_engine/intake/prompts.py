@@ -83,7 +83,10 @@ DEFAULT_PROMPT_VERSION = "v2"
 SYSTEM_PROMPT = PROMPTS[DEFAULT_PROMPT_VERSION]
 
 
-def _brief_block(brief: IdeaBrief) -> str:
+def brief_block(brief: IdeaBrief) -> str:
+    """The requester's material. Sent as its own cached block ahead of each task, so repeat
+    calls in a run (decompose, repairs) read it from the prompt cache. It stays in the user
+    turn: requester content never gains system-prompt authority."""
     parts = [f"<idea>\n{brief.idea.strip()}\n</idea>"]
     if brief.context.strip():
         parts.append(f"<context>\n{brief.context.strip()}\n</context>")
@@ -93,9 +96,8 @@ def _brief_block(brief: IdeaBrief) -> str:
     return "\n\n".join(parts)
 
 
-def clarify_prompt(brief: IdeaBrief, max_questions: int = 5) -> str:
+def clarify_prompt(max_questions: int = 5) -> str:
     return (
-        f"{_brief_block(brief)}\n\n"
         f"Before this idea is broken down, list up to {max_questions} questions whose answers "
         "would most change the backlog (scope, users, constraints, success measures). For "
         "each, say why it matters and the assumption you would make if nobody answers. Ask "
@@ -104,9 +106,8 @@ def clarify_prompt(brief: IdeaBrief, max_questions: int = 5) -> str:
     )
 
 
-def decompose_prompt(brief: IdeaBrief, limits: Limits) -> str:
+def decompose_prompt(limits: Limits) -> str:
     return (
-        f"{_brief_block(brief)}\n\n"
         "Turn this idea into a backlog of epics, features and stories.\n"
         f"Limits: at most {limits.max_epics} epics, {limits.max_features_per_epic} features per "
         f"epic, {limits.max_stories_per_feature} stories per feature, and "
@@ -115,13 +116,23 @@ def decompose_prompt(brief: IdeaBrief, limits: Limits) -> str:
     )
 
 
-def repair_prompt(brief: IdeaBrief, backlog: Backlog, errors: list[Finding]) -> str:
+SIZE_RULES = {"too-many-epics", "too-many-features", "too-many-stories", "too-many-issues"}
+
+
+def repair_prompt(backlog: Backlog, errors: list[Finding]) -> str:
     issues = "\n".join(f"- [{f.rule}] {f.ref}: {f.message}" for f in errors)
+    size_note = ""
+    if any(f.rule in SIZE_RULES for f in errors):
+        size_note = (
+            " For size-limit errors, merge closely related items or move the lowest-priority "
+            "ones to out_of_scope, naming each moved item there."
+        )
     return (
-        f"{_brief_block(brief)}\n\n"
         "A draft backlog for this idea failed the quality gate.\n\n"
-        f"<draft_backlog>\n{json.dumps(backlog.model_dump(), indent=1)}\n</draft_backlog>\n\n"
+        f"<draft_backlog>\n{json.dumps(backlog.model_dump(), ensure_ascii=False)}\n"
+        "</draft_backlog>\n\n"
         f"<quality_errors>\n{issues}\n</quality_errors>\n\n"
-        "Return the complete corrected backlog. Fix every listed error, keep the refs and "
-        "content of items that had no errors, and do not drop scope to make errors go away."
+        "Return the complete corrected backlog. Fix every listed error and keep the refs and "
+        "content of items that had no errors." + size_note + " Apart from that, keep the "
+        "scope: do not delete items just to make other errors go away."
     )

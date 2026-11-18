@@ -14,20 +14,32 @@ from .models import Backlog
 
 Severity = Literal["error", "warning", "info"]
 
+# Commas are optional: "As a user I want X so that Y" is as valid as the comma form.
 USER_STORY_RE = re.compile(
-    r"^\s*as an? .+?,\s*i want .+?,?\s*so that .+", re.IGNORECASE | re.DOTALL
+    r"^\s*as an? .+?,?\s+i want .+?,?\s+so that .+", re.IGNORECASE | re.DOTALL
 )
 JIRA_SUMMARY_MAX = 255
 
 # Properties a description can promise; each should be tested by an acceptance criterion.
 CLAIMS = {
-    "encrypted": re.compile(r"\bencrypt", re.I),
-    "hashed": re.compile(r"\bhash", re.I),
-    "notified": re.compile(r"\bnotif", re.I),
-    "audited": re.compile(r"\baudit", re.I),
-    "masked": re.compile(r"\bmask", re.I),
-    "revoked": re.compile(r"\brevok", re.I),
+    "encrypted": re.compile(r"\bencrypt(?:s|ed|ing|ion)?\b", re.I),
+    "hashed": re.compile(r"\bhash(?:es|ed|ing)?\b", re.I),
+    "notified": re.compile(r"\bnotif(?:y|ies|ied|ying|ication|ications)\b", re.I),
+    "audited": re.compile(r"\baudit(?:s|ed|ing)?\b", re.I),
+    "masked": re.compile(r"\bmask(?:s|ed|ing)?\b", re.I),
+    "revoked": re.compile(r"\b(?:revok(?:e|es|ed|ing)|revocation)\b", re.I),
 }
+# A claim preceded closely by one of these is a negation ("no notification is sent").
+NEGATION_RE = re.compile(r"\b(?:no|not|never|without|nor)\b(?:\W+\w+){0,2}\W*$", re.I)
+
+
+def promises(text: str, pattern: re.Pattern[str]) -> bool:
+    """True when `text` asserts the property, ignoring negated mentions."""
+    def negated(start: int) -> bool:
+        before = re.split(r"[.;:!?\n]", text[max(0, start - 40):start])[-1]
+        return NEGATION_RE.search(before) is not None
+
+    return any(not negated(m.start()) for m in pattern.finditer(text))
 
 
 @dataclass(frozen=True)
@@ -123,7 +135,7 @@ def lint(backlog: Backlog, limits: Limits = Limits()) -> list[Finding]:
                 ac_text = " ".join(f"{ac.given} {ac.when} {ac.then}"
                                    for ac in story.acceptance_criteria)
                 for claim, pattern in CLAIMS.items():
-                    if pattern.search(story.description) and not pattern.search(ac_text):
+                    if promises(story.description, pattern) and not pattern.search(ac_text):
                         add(Finding("warning", "untested-claim", story.ref,
                                     f"Description says {claim}, but no acceptance criterion "
                                     "tests it."))

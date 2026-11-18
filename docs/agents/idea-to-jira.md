@@ -197,3 +197,23 @@ uv run python evals/intake/run_eval.py compare evals/results/v1 evals/results/v2
 Keyword expectations approximate a human review; read the backlogs as well before adopting
 a change. Model output varies between runs, so treat a single run per case as a signal, not
 proof.
+
+## Robustness and evidence
+
+- **No paid draft is lost.** Each attempt is saved to `runs/<id>/attempts/` as soon as it
+  arrives. If a repair fails, or you press Ctrl+C, the drafts so far are kept, and planning
+  returns the best one.
+- **Best attempt wins.** The result is the attempt with the fewest quality-gate errors, not
+  simply the last. A `scope-reduced` warning appears if repairs dropped more than a quarter
+  of the stories.
+- **Linked dependencies.** Stories are created after the stories they depend on, and
+  "Depends on" lists real, clickable Jira keys.
+- **Approval anchored in Jira.** Every issue created by a publish carries the hash of the
+  approval record. `vigilant intake verify --run <folder> --expect-head <hash>` proves the
+  run's log still contains that approval. A truncated or rewritten log fails this check,
+  even if its internal chain looks intact.
+- **Approval method recorded.** `--yes` requires `--approver`. The log records whether
+  approval was typed or flagged, the OS user, and whether the terminal was interactive.
+  Local identity is self-asserted; the service deployment takes it from SSO.
+- **Context.** See [context guidelines](context-guidelines.md) for writing standards files
+  and idea context. `--context-file` can be repeated, standards first.

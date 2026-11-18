@@ -87,23 +87,41 @@ class EventLog:
             head = (event["seq"], event["hash"])
         return head
 
-    def verify(self) -> tuple[bool, str]:
+    @property
+    def head(self) -> str:
+        """Hash of the latest event (GENESIS for an empty log)."""
+        if self._head is None:
+            self._head = self._scan_head()
+        return self._head[1]
+
+    def verify(self, expect_head: str | None = None) -> tuple[bool, str]:
+        """Check the chain. A hash chain alone cannot reveal deleted trailing events or a
+        fully rewritten log, so pass `expect_head` (a hash recorded somewhere else, such as
+        the approval hash written into each Jira issue) to prove that record is still here."""
         if not self.path.exists():
             return False, "No event log found."
         prev = GENESIS
+        hashes: set[str] = set()
         try:
             for n, event in enumerate(self.events(), 1):
                 claimed = event.pop("hash", None)
                 if claimed is None or "prev_hash" not in event:
                     return False, f"Event {n}: missing hash fields."
+                if event.get("seq") != n:
+                    return False, f"Event {n}: sequence number {event.get('seq')} is out of order."
                 if event["prev_hash"] != prev:
                     return False, f"Event {n}: chain broken (prev_hash mismatch)."
                 if digest(event) != claimed:
                     return False, f"Event {n}: content does not match its hash."
+                hashes.add(claimed)
                 prev = claimed
         except EvidenceError as exc:
             return False, str(exc)
-        return True, f"Chain intact; head {prev}."
+        if expect_head and expect_head not in hashes:
+            return False, (f"Record {expect_head} is not in this log: events after it were "
+                           "removed or the log was rewritten.")
+        suffix = f"; contains record {expect_head}" if expect_head else ""
+        return True, f"Chain intact; head {prev}{suffix}."
 
 
 class RunStore:
@@ -126,6 +144,7 @@ class RunStore:
 
     def write_text(self, name: str, text: str) -> Path:
         p = self.path(name)
+        p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text, encoding="utf-8")
         return p
 

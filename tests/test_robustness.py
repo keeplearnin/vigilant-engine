@@ -156,3 +156,58 @@ def test_append_reads_log_once(tmp_path, monkeypatch):
     assert calls["n"] == 2  # one verify + one head scan, then cached
     monkeypatch.setattr(EventLog, "events", original)
     assert reader.verify()[0]
+
+
+# --- planner: best attempt, failed repairs, scope drops, size repairs ------------------------
+
+from vigilant_engine.intake import BacklogPlanner, IdeaBrief  # noqa: E402
+from vigilant_engine.intake.prompts import repair_prompt  # noqa: E402
+from vigilant_engine.intake.quality import Finding  # noqa: E402
+from vigilant_engine.llm import LLMError  # noqa: E402
+
+
+def broken_story(make_backlog, n_errors=1):
+    def mutate(d):
+        stories = d["epics"][0]["features"][0]["stories"]
+        for s in stories[:n_errors]:
+            s["user_story"] = "Show status"
+    return make_backlog(mutate)
+
+
+def test_best_attempt_is_kept(make_backlog):
+    one_error, two_errors = broken_story(make_backlog, 1), broken_story(make_backlog, 2)
+    result = BacklogPlanner(FakeLLM(one_error, two_errors, two_errors)).plan(IdeaBrief(idea="x"))
+    assert result.attempts == 3 and result.chosen_attempt == 1
+    assert sum(f.severity == "error" for f in result.findings) == 1
+
+
+def test_failed_repair_keeps_the_draft(make_backlog):
+    saved = []
+    planner = BacklogPlanner(FakeLLM(broken_story(make_backlog), LLMError("hit max_tokens")),
+                             on_attempt=lambda n, b, f: saved.append(n))
+    result = planner.plan(IdeaBrief(idea="x"))
+    assert result.repair_error and "max_tokens" in result.repair_error
+    assert result.backlog.counts()["stories"] == 3 and saved == [1]
+
+
+def test_scope_drop_is_flagged(make_backlog, backlog_dict):
+    first = broken_story(make_backlog)
+    shrunk = make_backlog(lambda d: d["epics"][0]["features"][0].update(
+        stories=d["epics"][0]["features"][0]["stories"][:1]))
+    shrunk["epics"][0]["features"][1]["stories"][0]["depends_on"] = []
+    result = BacklogPlanner(FakeLLM(first, shrunk)).plan(IdeaBrief(idea="x"))
+    assert any(f.rule == "scope-reduced" for f in result.findings)
+
+
+def test_size_errors_get_explicit_repair_guidance(backlog_dict):
+    from vigilant_engine.intake import Backlog
+    backlog = Backlog.model_validate(backlog_dict)
+    size = repair_prompt(backlog, [Finding("error", "too-many-issues", "backlog", "too many")])
+    other = repair_prompt(backlog, [Finding("error", "user-story-format", "s", "format")])
+    assert "merge closely related items" in size and "merge closely" not in other
+
+
+def test_ctrl_c_during_plan_is_recorded(tmp_path):
+    code, run_dir, out = plan(tmp_path, FakeLLM(KeyboardInterrupt()))
+    assert code == 130 and "Stopped" in out
+    assert "KeyboardInterrupt" in (run_dir / "events.jsonl").read_text()

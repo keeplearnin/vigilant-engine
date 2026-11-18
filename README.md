@@ -61,6 +61,8 @@ Enterprise deployment example: [`docs/engagements/the-hartford/`](docs/engagemen
 |---|---|---|
 | [Idea-to-Jira intake](docs/agents/idea-to-jira.md) | Working, Jira Cloud | Turns a product idea into reviewed epics, features and stories, then creates them in Jira after human approval |
 
+Writing context for the agent: [context guidelines](docs/agents/context-guidelines.md) · templates in `standards/TEMPLATE.md` and `examples/context/TEMPLATE.md`.
+
 ```bash
 uv sync
 uv run vigilant intake plan --idea-file examples/ideas/claim-status-updates.md --interactive

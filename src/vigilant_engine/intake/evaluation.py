@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -88,7 +89,26 @@ def load_cases(path: Path) -> list[Case]:
 
 
 def backlog_text(backlog: Backlog) -> str:
-    return json.dumps(backlog.model_dump(), ensure_ascii=False)
+    """Every text field, each ending in a full stop on its own line, so an expectation's
+    `[^.]` window cannot join words from two different fields or stories."""
+    parts: list[str] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                parts.append(text if text.endswith(".") else text + ".")
+        elif isinstance(value, dict) and {"given", "when", "then"} <= value.keys():
+            walk(f"Given {value['given']}, when {value['when']}, then {value['then']}")
+        elif isinstance(value, dict):
+            for v in value.values():
+                walk(v)
+        elif isinstance(value, list):
+            for v in value:
+                walk(v)
+
+    walk(backlog.model_dump())
+    return "\n".join(parts)
 
 
 def score(backlog: Backlog, findings: list[Finding] | None = None,
@@ -168,13 +188,16 @@ def main(argv: list[str] | None = None, *, llm: Any = None, stdin: TextIO = sys.
     run = sub.add_parser("run", help="Plan every case and score it (uses Claude; costs money)")
     run.add_argument("--label", required=True)
     run.add_argument("--prompt-version", default="v2")
-    run.add_argument("--context-file", type=Path, help="Extra context for every case")
+    run.add_argument("--context-file", type=Path, action="append", default=[],
+                     help="Extra context for every case (repeatable)")
     run.add_argument("--cases", type=Path, default=default_cases)
     run.add_argument("--only", action="append", help="Run only these case ids")
     run.add_argument("--effort", default="high")
     run.add_argument("--model", default=None)
     run.add_argument("--results-dir", type=Path, default=Path("evals/results"))
     run.add_argument("--yes", action="store_true", help="Skip the cost confirmation")
+    run.add_argument("--overwrite", action="store_true",
+                     help="Replace an existing results folder with the same label")
 
     sc = sub.add_parser("score", help="Score an existing backlog.json (free)")
     sc.add_argument("--backlog", type=Path, required=True)
@@ -210,7 +233,17 @@ def main(argv: list[str] | None = None, *, llm: Any = None, stdin: TextIO = sys.
         return 0
 
     # run
+    unknown = [c for c in (args.only or []) if c not in cases]
+    if unknown:
+        print(f"Unknown case id(s): {', '.join(unknown)}. Known: {', '.join(sorted(cases))}",
+              file=out)
+        return 1
     selected = [cases[c] for c in (args.only or cases)]
+    folder = args.results_dir / args.label
+    if folder.exists() and any(folder.iterdir()) and not args.overwrite:
+        print(f"{folder} already has results. Use a new --label, or --overwrite to replace "
+              "them (old and new results are never mixed).", file=out)
+        return 1
     if not args.yes:
         print(f"This plans {len(selected)} idea(s) with Claude at effort '{args.effort}' "
               f"(roughly a few dollars each). Continue? [y/N] ", end="", file=out, flush=True)
@@ -221,12 +254,14 @@ def main(argv: list[str] | None = None, *, llm: Any = None, stdin: TextIO = sys.
     from ..llm import ClaudeLLM
     from .planner import BacklogPlanner
 
+    if folder.exists():
+        shutil.rmtree(folder)
     llm = llm or ClaudeLLM(model=args.model)
     planner = BacklogPlanner(llm, effort=args.effort, prompt_version=args.prompt_version)
-    context = args.context_file.read_text(encoding="utf-8") if args.context_file else ""
-    folder = args.results_dir / args.label
+    context = "\n\n---\n\n".join(p.read_text(encoding="utf-8").strip()
+                                    for p in args.context_file)
     summary = {"label": args.label, "prompt_version": args.prompt_version,
-               "context_file": str(args.context_file) if args.context_file else None,
+               "context_files": [str(p) for p in args.context_file],
                "model": llm.model, "started": datetime.now(UTC).isoformat(), "cases": {}}
     for case in selected:
         print(f"[{case.id}] planning...", file=out, flush=True)

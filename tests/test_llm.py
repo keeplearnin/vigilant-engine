@@ -61,6 +61,22 @@ def test_request_shape_and_result():
     assert body["output_config"]["format"]["type"] == "json_schema"
     assert body["thinking"] == {"type": "adaptive"}
     assert body["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert body["max_tokens"] == 64000  # explicit value from the call
+    assert body["messages"][0]["content"] == [{"type": "text", "text": "hello"}]
+
+
+def test_preamble_is_a_separate_cached_user_block():
+    captured: list[httpx.Request] = []
+    make_llm(sse('{"questions": []}'), captured).structured(
+        system="sys", preamble="<idea>x</idea>", prompt="task",
+        schema=output_schema(ClarifyingQuestions))
+    body = json.loads(captured[0].content)
+    first, second = body["messages"][0]["content"]
+    assert first == {"type": "text", "text": "<idea>x</idea>",
+                     "cache_control": {"type": "ephemeral"}}
+    assert second == {"type": "text", "text": "task"}
+    assert body["max_tokens"] == 128000  # default allows long backlogs
+    assert "<idea>" not in json.dumps(body["system"])
 
 
 def test_refusal_raises():
