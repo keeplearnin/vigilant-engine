@@ -42,7 +42,13 @@ class BacklogPlanner:
         max_repairs: int = 2,
         effort: Effort = "high",
         events: EventLog | None = None,
+        prompt_version: str = prompts.DEFAULT_PROMPT_VERSION,
     ):
+        if prompt_version not in prompts.PROMPTS:
+            raise ValueError(f"Unknown prompt version {prompt_version!r}; "
+                             f"choose from {sorted(prompts.PROMPTS)}.")
+        self.prompt_version = prompt_version
+        self.system_prompt = prompts.PROMPTS[prompt_version]
         self.llm = llm
         self.limits = limits or Limits()
         self.max_repairs = max_repairs
@@ -91,10 +97,11 @@ class BacklogPlanner:
         max_tokens: int = 64000,
         calls: list[dict[str, Any]] | None = None,
     ) -> LLMResult:
-        self._emit("model.request", {"step": step, "model": self.llm.model})
+        self._emit("model.request", {"step": step, "model": self.llm.model,
+                                     "prompt_version": self.prompt_version})
         try:
             result = self.llm.structured(
-                system=prompts.SYSTEM_PROMPT,
+                system=self.system_prompt,
                 prompt=prompt,
                 schema=schema,
                 effort=effort or self.effort,
@@ -105,6 +112,7 @@ class BacklogPlanner:
             raise
         record = {
             "step": step,
+            "prompt_version": self.prompt_version,
             "model": result.model,
             "stop_reason": result.stop_reason,
             "fell_back": result.fell_back,

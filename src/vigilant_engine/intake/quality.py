@@ -19,6 +19,16 @@ USER_STORY_RE = re.compile(
 )
 JIRA_SUMMARY_MAX = 255
 
+# Properties a description can promise; each should be tested by an acceptance criterion.
+CLAIMS = {
+    "encrypted": re.compile(r"\bencrypt", re.I),
+    "hashed": re.compile(r"\bhash", re.I),
+    "notified": re.compile(r"\bnotif", re.I),
+    "audited": re.compile(r"\baudit", re.I),
+    "masked": re.compile(r"\bmask", re.I),
+    "revoked": re.compile(r"\brevok", re.I),
+}
+
 
 @dataclass(frozen=True)
 class Limits:
@@ -110,6 +120,18 @@ def lint(backlog: Backlog, limits: Limits = Limits()) -> list[Finding]:
                     if not (ac.given.strip() and ac.when.strip() and ac.then.strip()):
                         add(Finding("error", "acceptance-criteria-incomplete", story.ref,
                                     f"Acceptance criterion {i} is missing given/when/then text."))
+                ac_text = " ".join(f"{ac.given} {ac.when} {ac.then}"
+                                   for ac in story.acceptance_criteria)
+                for claim, pattern in CLAIMS.items():
+                    if pattern.search(story.description) and not pattern.search(ac_text):
+                        add(Finding("warning", "untested-claim", story.ref,
+                                    f"Description says {claim}, but no acceptance criterion "
+                                    "tests it."))
+                if story.story_points > 5 and (" and " in story.title.lower()
+                                               or "," in story.title):
+                    add(Finding("warning", "story-too-broad", story.ref,
+                                f"{story.story_points} points and the title combines several "
+                                "things; consider splitting."))
                 if story.story_points == 13:
                     add(Finding("warning", "story-too-large", story.ref,
                                 "13 points is too large for one sprint; consider splitting."))

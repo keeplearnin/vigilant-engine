@@ -20,6 +20,7 @@ from pydantic import ValidationError
 
 from ..evidence import EvidenceError, RunStore, digest
 from ..intake import Backlog, BacklogPlanner, IdeaBrief, Limits, PlannerError, lint
+from ..intake.prompts import DEFAULT_PROMPT_VERSION, PROMPTS
 from ..intake.quality import has_errors
 from ..intake.render import to_markdown
 from ..integrations.jira import (
@@ -56,6 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--aws-region", default=None, help="Bedrock region (or set AWS_REGION)")
     plan.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
                       default="high")
+    plan.add_argument("--prompt-version", choices=sorted(PROMPTS), default=DEFAULT_PROMPT_VERSION,
+                      help="System prompt version (for before/after comparisons)")
     plan.add_argument("--max-epics", type=int, default=Limits.max_epics)
     plan.add_argument("--max-features-per-epic", type=int, default=Limits.max_features_per_epic)
     plan.add_argument("--max-stories-per-feature", type=int,
@@ -108,13 +111,16 @@ def cmd_plan(args: argparse.Namespace, *, llm: StructuredLLM | None = None,
             print(f"Cannot reach Claude: {exc}", file=out)
             return EXIT_ERROR
     store = RunStore(args.runs_dir)
-    planner = BacklogPlanner(llm, limits=limits, effort=args.effort, events=store.events)
+    planner = BacklogPlanner(llm, limits=limits, effort=args.effort, events=store.events,
+                             prompt_version=args.prompt_version)
     brief = IdeaBrief(idea=idea, context=context)
 
     store.write_text("idea.md", idea)
     store.write_json("limits.json", asdict(limits))
     store.events.append("run.started", actor=f"human:{getpass.getuser()}",
                         payload={"idea_digest": digest(idea.encode()), "model": llm.model,
+                                 "prompt_version": args.prompt_version,
+                                 "context_digest": digest(context.encode()) if context else None,
                                  "limits": asdict(limits)})
     print(f"Run {store.run_id}: planning with {llm.model}...", file=out)
 

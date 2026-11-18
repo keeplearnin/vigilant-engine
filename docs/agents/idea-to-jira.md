@@ -143,3 +143,57 @@ runs/<run-id>/
   Bedrock endpoint.
 - Planning a large idea takes a few minutes and costs a few dollars of model usage at
   `high` effort. Lower `--effort` or the limits for quick drafts.
+
+## Improving results: standards files and evaluation
+
+**Prompt versions.** `--prompt-version v2` (the default) adds a quality bar learned from
+reviewing real runs:
+- every promised property has an acceptance criterion that tests it;
+- security properties hold across the whole flow;
+- limits are numbers with units;
+- stories above 5 points are split;
+- the MVP starts with a walking-skeleton story;
+- cross-cutting quality is recorded in the Definition of Done.
+
+`v1` is kept for comparisons. Prompts live in `src/vigilant_engine/intake/prompts.py`.
+
+**Standards files.** Domain rules belong in a file passed with `--context-file`, so each
+team can keep its own rules without changing code:
+
+```bash
+uv run vigilant intake plan --idea "..." --context-file standards/security-identity.md
+```
+
+`standards/security-identity.md` covers sign-in, recovery and credential flows: owner
+notification, cooling-off periods, session revocation, step-skip guards, identical
+responses, and breached-password checks. Add more files under `standards/` as needed,
+for example payments or claims.
+
+**Quality gate warnings.** Two warnings back the prompt with fixed checks:
+- `untested-claim`: a description says encrypted, hashed, notified, audited, masked or
+  revoked, but no acceptance criterion tests it.
+- `story-too-broad`: a story is over 5 points and its title combines several things.
+
+**Evaluation.** Before trusting a prompt or standards change, compare it on a fixed set of
+ideas (`evals/intake/cases.json`). Each case lists expectations a reviewer would demand,
+and scoring is deterministic and free. `run` uses Claude and costs roughly a few dollars
+per idea.
+
+```bash
+# Score a backlog you already have (free)
+uv run python evals/intake/run_eval.py score --backlog runs/<id>/backlog.json \
+    --case password-reset-sms --label v1-existing
+
+# Plan the cases with each prompt version (costs money; asks first)
+uv run python evals/intake/run_eval.py run --prompt-version v1 --label v1
+uv run python evals/intake/run_eval.py run --prompt-version v2 --label v2
+uv run python evals/intake/run_eval.py run --prompt-version v2 --label v2-standards \
+    --context-file standards/security-identity.md
+
+# Compare (free)
+uv run python evals/intake/run_eval.py compare evals/results/v1 evals/results/v2
+```
+
+Keyword expectations approximate a human review; read the backlogs as well before adopting
+a change. Model output varies between runs, so treat a single run per case as a signal, not
+proof.
