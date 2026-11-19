@@ -566,11 +566,20 @@ def _short_error(exc: Exception) -> str:
 
 def serve(port: int = 8765, runs_dir: Path = Path("runs"), open_browser: bool = True) -> None:
     """Start the UI on the loopback address only."""
+    import socket
     import threading
     import webbrowser
 
     import uvicorn
 
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            raise SystemExit(
+                f"Port {port} is already in use, probably by a UI you started earlier.\n"
+                f"  Open http://127.0.0.1:{port}/ if that is vigilant-engine, or start on "
+                f"another port:\n  uv run vigilant ui --port {port + 5}") from None
     app = create_app(WebConfig(runs_dir=runs_dir, port=port))
     url = f"http://127.0.0.1:{port}/"
     print(f"vigilant-engine UI: {url}  (press Ctrl+C to stop)")
