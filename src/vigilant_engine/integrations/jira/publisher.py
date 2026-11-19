@@ -89,6 +89,18 @@ class PublishPlan:
     issues: list[PlannedIssue]
     warnings: list[str] = field(default_factory=list)
 
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PublishPlan:
+        data = dict(data)
+        data["issues"] = [
+            PlannedIssue(**{**i, "depends_on": [tuple(d) for d in i.get("depends_on", [])]})
+            for i in data["issues"]
+        ]
+        return cls(**data)
+
     @property
     def digest(self) -> str:
         return digest({

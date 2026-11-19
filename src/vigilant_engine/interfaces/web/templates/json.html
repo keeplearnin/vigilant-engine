@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Edit backlog{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Edit backlog JSON</h1>
+    <p class="muted">For larger changes: add, remove or reorder items. The format is checked and the quality gate runs again when you save.</p>
+  </div>
+  <a href="/runs/{{ run_id }}">Back to the run</a>
+</div>
+{% if error %}<div class="notice error"><strong>Not saved.</strong><pre>{{ error }}</pre></div>{% endif %}
+<form method="post" action="/runs/{{ run_id }}/json" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <textarea name="backlog" rows="32" class="mono code" spellcheck="false">{{ text }}</textarea>
+  <div class="actions"><button class="button" type="submit">Save backlog</button></div>
+</form>
+{% endblock %}

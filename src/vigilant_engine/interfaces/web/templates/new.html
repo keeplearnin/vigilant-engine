@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}New idea{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>New idea</h1>
+    <p class="muted">The more specific the context, the less Claude has to assume. Everything except the idea is optional.</p>
+  </div>
+</div>
+
+{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+
+<form method="post" action="/new" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+
+  <section class="card">
+    <label for="idea" class="label">The idea</label>
+    <textarea id="idea" name="idea" rows="4" required
+      placeholder="For example: Automated self-service password reset via SMS for employees">{{ values.idea or "" }}</textarea>
+  </section>
+
+  <section class="card">
+    <h2>Standards to apply</h2>
+    <p class="muted small">Team rules maintained in <span class="mono">standards/</span>. Each is reviewed by its owner.</p>
+    {% if standards %}
+    <div class="checks">
+      {% for s in standards %}
+      <label class="check">
+        <input type="checkbox" name="standards" value="{{ s.name }}" {% if s.name in (values.standards or []) %}checked{% endif %}>
+        <span>{{ s.title }}</span>
+      </label>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="muted">No standards files found.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Idea context</h2>
+    <p class="muted small">Facts, not solution designs. No secrets or customer data: this text is sent to Claude and kept in the run folder.</p>
+    <div class="grid-2">
+      {% for key, label, hint in fields %}
+      <div class="field">
+        <label for="{{ key }}" class="label">{{ label }}</label>
+        <textarea id="{{ key }}" name="{{ key }}" rows="2" placeholder="{{ hint }}">{{ values[key] or "" }}</textarea>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="card">
+    <label class="check">
+      <input type="checkbox" name="clarify" {% if values.clarify %}checked{% endif %}>
+      <span><strong>Ask me clarifying questions first</strong> <span class="muted">(recommended: up to 5 questions, each with a suggested answer)</span></span>
+    </label>
+    <details class="advanced">
+      <summary>Advanced options</summary>
+      <div class="grid-3">
+        <div class="field"><label class="label" for="effort">Effort</label>
+          <select id="effort" name="effort">
+            {% for e in ["low", "medium", "high", "xhigh", "max"] %}
+            <option value="{{ e }}" {% if (values.effort or "high") == e %}selected{% endif %}>{{ e }}</option>
+            {% endfor %}
+          </select></div>
+        <div class="field"><label class="label" for="prompt_version">Prompt version</label>
+          <select id="prompt_version" name="prompt_version">
+            {% for v in prompt_versions %}
+            <option value="{{ v }}" {% if (values.prompt_version or default_prompt) == v %}selected{% endif %}>{{ v }}</option>
+            {% endfor %}
+          </select></div>
+        <div class="field"><label class="label" for="max_epics">Max epics</label>
+          <input id="max_epics" name="max_epics" type="number" min="1" value="{{ values.max_epics or limits.max_epics }}"></div>
+        <div class="field"><label class="label" for="max_features_per_epic">Max features per epic</label>
+          <input id="max_features_per_epic" name="max_features_per_epic" type="number" min="1" value="{{ values.max_features_per_epic or limits.max_features_per_epic }}"></div>
+        <div class="field"><label class="label" for="max_stories_per_feature">Max stories per feature</label>
+          <input id="max_stories_per_feature" name="max_stories_per_feature" type="number" min="1" value="{{ values.max_stories_per_feature or limits.max_stories_per_feature }}"></div>
+        <div class="field"><label class="label" for="max_total_issues">Max items in total</label>
+          <input id="max_total_issues" name="max_total_issues" type="number" min="1" value="{{ values.max_total_issues or limits.max_total_issues }}"></div>
+      </div>
+    </details>
+  </section>
+
+  <div class="actions">
+    <button type="submit" class="button">Start planning</button>
+    <span class="muted small">Planning usually takes 3 to 8 minutes and costs a few dollars of Claude usage at high effort.</span>
+  </div>
+</form>
+{% endblock %}

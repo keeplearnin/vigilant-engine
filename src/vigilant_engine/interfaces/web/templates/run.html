@@ -1,0 +1,263 @@
+{% extends "base.html" %}
+{% block title %}{{ summary.product or "Run" }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>{{ summary.product or "New idea" }}</h1>
+    <p class="mono muted small">{{ run_id }}</p>
+  </div>
+  <span class="state state-{{ ('working' if working else summary.state) | replace(' ', '-') }}">{{ 'working' if working else summary.state }}</span>
+</div>
+
+{% if notice %}<div class="notice {{ 'error' if ('FAILED' in notice or notice.startswith('Not ') or 'failed' in notice) else '' }}">{{ notice }}</div>{% endif %}
+
+{% if working %}
+<section class="card progress" id="progress" data-run="{{ run_id }}">
+  <div class="spinner" aria-hidden="true"></div>
+  <div>
+    <h2 id="progress-step">{{ step or "Working" }}</h2>
+    <p class="muted"><span id="progress-elapsed">{{ job.elapsed if job else 0 }}</span> seconds elapsed. This page updates by itself; you can leave it open.</p>
+  </div>
+</section>
+{% endif %}
+
+{% if job and job.error and not working %}
+<div class="notice error">The last step stopped unexpectedly: {{ job.error }}</div>
+{% endif %}
+
+{% if summary.state == "failed" and not working %}
+<section class="card">
+  <h2>Planning stopped</h2>
+  <p>{{ summary.error }}</p>
+  <a class="button" href="/new?source={{ run_id }}">Try again with the same idea</a>
+</section>
+{% endif %}
+
+{% if questions and not working %}
+<section class="card">
+  <h2>A few questions first</h2>
+  <p class="muted">Answer what you can. Leave a box empty to accept Claude's suggested assumption.</p>
+  <form method="post" action="/runs/{{ run_id }}/answers" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    {% for q in questions %}
+    <div class="field">
+      <label class="label" for="answer_{{ loop.index0 }}">{{ loop.index }}. {{ q.question }}</label>
+      <p class="muted small">Why it matters: {{ q.why_it_matters }}</p>
+      <textarea id="answer_{{ loop.index0 }}" name="answer_{{ loop.index0 }}" rows="2" placeholder="Suggested: {{ q.default_assumption }}"></textarea>
+    </div>
+    {% endfor %}
+    <div class="actions"><button class="button" type="submit">Plan the backlog</button></div>
+  </form>
+</section>
+{% endif %}
+
+{% if backlog %}
+{% set errors = findings | selectattr("severity", "equalto", "error") | list %}
+{% set warnings = findings | rejectattr("severity", "equalto", "error") | list %}
+{% set c = backlog.counts() %}
+
+<section class="summary-bar">
+  <div><strong>{{ c.epics }}</strong> epics</div>
+  <div><strong>{{ c.features }}</strong> features</div>
+  <div><strong>{{ c.stories }}</strong> stories</div>
+  <div><strong>{{ c.story_points }}</strong> points</div>
+  <div class="gate {{ 'gate-blocked' if errors else 'gate-ok' }}">
+    {% if errors %}Blocked: {{ errors | length }} error(s){% else %}Quality gate passed{% endif %}
+    {% if warnings %} · {{ warnings | length }} note(s){% endif %}
+  </div>
+</section>
+
+{% if findings %}
+<section class="card">
+  <h2>Quality gate</h2>
+  <ul class="findings">
+    {% for f in errors + warnings %}
+    <li class="finding finding-{{ f.severity }}">
+      <span class="sev">{{ f.severity }}</span>
+      {% if f.ref in ids %}<a href="#story-{{ f.ref }}">{{ ids[f.ref] }}</a>{% else %}<span class="mono">{{ f.ref }}</span>{% endif %}
+      {{ f.message }} <span class="muted small">({{ f.rule }})</span>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Overview</h2>
+  <p><strong>Problem.</strong> {{ backlog.problem_statement }}</p>
+  <p><strong>Vision.</strong> {{ backlog.vision }}</p>
+  <p><strong>Users.</strong> {{ backlog.target_users | join("; ") }}</p>
+  <p class="small"><a href="/runs/{{ run_id }}/json">Edit the whole backlog as JSON</a></p>
+</section>
+
+<section class="tree">
+{% for epic in backlog.epics %}
+  <details class="epic" open>
+    <summary>
+      <span class="id">{{ ids[epic.ref] }}</span>
+      <span class="title">{{ epic.title }}</span>
+      <span class="tag">{{ epic.priority }}</span>{% if epic.in_mvp %}<span class="tag tag-mvp">MVP</span>{% endif %}
+    </summary>
+    <div class="epic-body">
+      <p>{{ epic.summary }}</p>
+      <p><strong>Outcome:</strong> {{ epic.business_outcome }}</p>
+      {% if epic.success_metrics %}<ul class="metrics">{% for m in epic.success_metrics %}<li>{{ m }}</li>{% endfor %}</ul>{% endif %}
+
+      {% for feature in epic.features %}
+      <details class="feature" open>
+        <summary>
+          <span class="id">{{ ids[feature.ref] }}</span>
+          <span class="title">{{ feature.title }}</span>
+          <span class="tag">{{ feature.priority }}</span>
+          <span class="muted small">{{ feature.stories | sum(attribute="story_points") }} pts</span>
+        </summary>
+        <p class="muted">{{ feature.description }}</p>
+        <p class="small"><strong>Benefit hypothesis:</strong> {{ feature.benefit_hypothesis }}</p>
+
+        {% for story in feature.stories %}
+        {% set story_findings = findings | selectattr("ref", "equalto", story.ref) | list %}
+        <details class="story" id="story-{{ story.ref }}">
+          <summary>
+            <span class="id">{{ ids[story.ref] }}</span>
+            <span class="title">{{ story.title }}</span>
+            <span class="tag">{{ story.story_points }} pts</span>
+            <span class="tag">{{ story.priority }}</span>
+            <span class="tag tag-kind">{{ story.kind }}</span>
+            {% for f in story_findings %}<span class="flag flag-{{ f.severity }}" title="{{ f.message }}">{{ f.rule }}</span>{% endfor %}
+          </summary>
+          <div class="story-body">
+            <p class="user-story">{{ story.user_story }}</p>
+            {% if story.description %}<p>{{ story.description }}</p>{% endif %}
+            <h4>Acceptance criteria</h4>
+            <ul class="criteria">
+              {% for ac in story.acceptance_criteria %}
+              <li><b>Given</b> {{ ac.given }}, <b>when</b> {{ ac.when }}, <b>then</b> {{ ac.then }}</li>
+              {% endfor %}
+            </ul>
+            {% if story.depends_on %}
+            <p class="small"><strong>Depends on:</strong>
+              {% for d in story.depends_on %}<a href="#story-{{ d }}">{{ ids.get(d, d) }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+            {% endif %}
+
+            <details class="edit">
+              <summary>Edit story</summary>
+              <form method="post" action="/runs/{{ run_id }}/stories/{{ story.ref }}" class="stack">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <div class="field"><label class="label" for="t-{{ story.ref }}">Title</label>
+                  <input id="t-{{ story.ref }}" name="title" value="{{ story.title }}"></div>
+                <div class="field"><label class="label" for="u-{{ story.ref }}">User story</label>
+                  <textarea id="u-{{ story.ref }}" name="user_story" rows="2">{{ story.user_story }}</textarea></div>
+                <div class="field"><label class="label" for="d-{{ story.ref }}">Description</label>
+                  <textarea id="d-{{ story.ref }}" name="description" rows="2">{{ story.description }}</textarea></div>
+                <div class="grid-2">
+                  <div class="field"><label class="label" for="p-{{ story.ref }}">Points</label>
+                    <select id="p-{{ story.ref }}" name="story_points">
+                      {% for p in [1, 2, 3, 5, 8, 13] %}<option value="{{ p }}" {% if story.story_points == p %}selected{% endif %}>{{ p }}</option>{% endfor %}
+                    </select></div>
+                  <div class="field"><label class="label" for="r-{{ story.ref }}">Priority</label>
+                    <select id="r-{{ story.ref }}" name="priority">
+                      {% for p in ["must", "should", "could"] %}<option value="{{ p }}" {% if story.priority == p %}selected{% endif %}>{{ p }}</option>{% endfor %}
+                    </select></div>
+                </div>
+                <div class="field"><label class="label" for="c-{{ story.ref }}">Acceptance criteria <span class="muted small">(one per line: Given … | When … | Then …)</span></label>
+                  <textarea id="c-{{ story.ref }}" name="criteria" rows="4" class="mono">{% for ac in story.acceptance_criteria %}Given {{ ac.given }} | When {{ ac.when }} | Then {{ ac.then }}
+{% endfor %}</textarea></div>
+                <div class="actions"><button class="button small" type="submit">Save story</button>
+                  <span class="muted small">The quality gate runs again on save.</span></div>
+              </form>
+            </details>
+          </div>
+        </details>
+        {% endfor %}
+      </details>
+      {% endfor %}
+    </div>
+  </details>
+{% endfor %}
+</section>
+
+<section class="grid-2">
+  {% for title, items in [("Assumptions", backlog.assumptions), ("Open questions", backlog.open_questions), ("Out of scope", backlog.out_of_scope), ("Risks", backlog.risks)] %}
+  {% if items %}
+  <div class="card"><h2>{{ title }}</h2><ul>{% for i in items %}<li>{{ i }}</li>{% endfor %}</ul></div>
+  {% endif %}
+  {% endfor %}
+</section>
+
+<section class="card" id="publish">
+  <h2>Publish to Jira</h2>
+  {% if jira_error %}<div class="notice error">Last Jira attempt failed: {{ jira_error }}</div>{% endif %}
+
+  {% if summary.state == "published" %}
+    <p>Created {{ summary.created | length }} issues.</p>
+    <p class="keys">{% for key in summary.created %}{% if jira_base_url %}<a href="{{ jira_base_url }}/browse/{{ key }}" target="_blank" rel="noopener">{{ key }}</a>{% else %}<span class="mono">{{ key }}</span>{% endif %}{% if not loop.last %} {% endif %}{% endfor %}</p>
+  {% elif errors %}
+    <p class="muted">Fix the quality-gate errors above first. Publishing stays locked while errors remain.</p>
+  {% elif not working %}
+    <form method="post" action="/runs/{{ run_id }}/preview" class="stack">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <div class="grid-3">
+        <div class="field"><label class="label" for="project">Project key</label>
+          <input id="project" name="project" required placeholder="SAM1" value="{{ plan.project_key if plan else '' }}"></div>
+        <div class="field"><label class="label" for="story_type">Story issue type</label>
+          <input id="story_type" name="story_type" value="{{ plan.issue_types.story if plan else 'Story' }}"></div>
+        <div class="field"><label class="label" for="feature_mode">Features as</label>
+          <select id="feature_mode" name="feature_mode">
+            <option value="auto">Detect automatically</option>
+            <option value="issue-type">Feature issues</option>
+            <option value="label">Labels on stories</option>
+          </select></div>
+      </div>
+      <details class="advanced"><summary>More Jira options</summary>
+        <div class="grid-3">
+          <div class="field"><label class="label" for="epic_type">Epic issue type</label><input id="epic_type" name="epic_type" value="Epic"></div>
+          <div class="field"><label class="label" for="feature_type">Feature issue type</label><input id="feature_type" name="feature_type" value="Feature"></div>
+          <div class="field"><label class="label" for="story_points_field">Story points field</label><input id="story_points_field" name="story_points_field" placeholder="customfield_10016"></div>
+        </div>
+      </details>
+      <div class="actions"><button class="button secondary" type="submit">Preview in Jira</button>
+        <span class="muted small">Reads your Jira project. Nothing is created.</span></div>
+    </form>
+
+    {% if plan and not plan_current %}
+      <div class="notice">The backlog changed after the last preview. Preview again before approving.</div>
+    {% elif plan %}
+      <div class="plan">
+        <h3>Plan for {{ plan.project_key }} ({{ plan.feature_mode }} mode): {{ plan.issues | length }} issues</h3>
+        {% for w in plan.warnings %}<p class="muted small">Note: {{ w }}</p>{% endfor %}
+        <ul class="plan-list">
+          {% for i in plan.issues %}
+          <li class="lvl-{{ i.level }}{% if plan.feature_mode == 'label' and i.level == 'story' %} lvl-feature{% endif %}"><span class="id">{{ i.local_id }}</span> <span class="tag">{{ i.issue_type }}</span> {{ i.summary }}{% if i.story_points %} <span class="muted small">[{{ i.story_points }}]</span>{% endif %}</li>
+          {% endfor %}
+        </ul>
+        <form method="post" action="/runs/{{ run_id }}/approve" class="stack approve">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="plan_digest" value="{{ plan.digest }}">
+          <div class="grid-2">
+            <div class="field"><label class="label" for="approver">Your name (recorded as approver)</label>
+              <input id="approver" name="approver" required autocomplete="name"></div>
+            <div class="field"><label class="label" for="confirm_project">Type <span class="mono">{{ plan.project_key }}</span> to confirm</label>
+              <input id="confirm_project" name="confirm_project" required autocomplete="off"></div>
+          </div>
+          <div class="actions"><button class="button danger" type="submit">Approve and create {{ plan.issues | length }} issues</button>
+            <span class="muted small">Creates exactly this plan. The approval is recorded in the audit log and written into each issue.</span></div>
+        </form>
+      </div>
+    {% endif %}
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Audit trail</h2>
+  {% if approval %}
+  <p class="small">Approved by <strong>{{ approval.actor.replace("human:", "") }}</strong> ({{ approval.payload.method }}) at {{ approval.ts[:19] | replace("T", " ") }} UTC.</p>
+  <p class="small">Approval record (also in each created issue): <span class="mono wrap-anywhere">{{ approval.hash }}</span></p>
+  {% endif %}
+  <form method="post" action="/runs/{{ run_id }}/verify" class="inline-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input name="expect_head" class="mono" placeholder="Optional: a record hash from a Jira issue" value="{{ approval.hash if approval else '' }}">
+    <button class="button secondary small" type="submit">Check audit log</button>
+  </form>
+</section>
+{% endblock %}

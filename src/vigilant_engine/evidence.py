@@ -41,6 +41,7 @@ class EventLog:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._head: tuple[int, str] | None = None  # (seq, hash) of the last event
+        self._size: int | None = None  # file size after our last write
 
     def events(self):
         """Yield every event. Raises EvidenceError on a line that is not a JSON object."""
@@ -58,8 +59,18 @@ class EventLog:
                     raise EvidenceError(f"Event {n}: not a JSON object.")
                 yield event
 
+    def _changed_elsewhere(self) -> bool:
+        """Another EventLog instance (a web request, a background job) appended since we
+        last wrote: our cached head is stale and must be re-read."""
+        if self._size is None:
+            return False
+        try:
+            return self.path.stat().st_size != self._size
+        except FileNotFoundError:
+            return True
+
     def append(self, event_type: str, *, actor: str, payload: dict[str, Any]) -> dict[str, Any]:
-        if self._head is None:
+        if self._head is None or self._changed_elsewhere():
             ok, message = self.verify()
             if not ok and self.path.exists():
                 raise EvidenceError(
@@ -79,6 +90,7 @@ class EventLog:
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(event, ensure_ascii=False) + "\n")
         self._head = (event["seq"], event["hash"])
+        self._size = self.path.stat().st_size
         return event
 
     def _scan_head(self) -> tuple[int, str]:
@@ -90,7 +102,7 @@ class EventLog:
     @property
     def head(self) -> str:
         """Hash of the latest event (GENESIS for an empty log)."""
-        if self._head is None:
+        if self._head is None or self._changed_elsewhere():
             self._head = self._scan_head()
         return self._head[1]
 

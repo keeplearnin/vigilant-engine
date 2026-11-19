@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Standards{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Standards library</h1>
+    <p class="muted">Team rules you can apply to an idea. They are policy, so they are read-only here: change them through a reviewed pull request to <span class="mono">standards/</span>. See <span class="mono">docs/agents/context-guidelines.md</span>.</p>
+  </div>
+</div>
+{% for s in standards %}
+<details class="card standard">
+  <summary><strong>{{ s.title }}</strong> <span class="mono muted small">standards/{{ s.name }}.md</span></summary>
+  <pre class="doc">{{ s.text }}</pre>
+</details>
+{% else %}
+<section class="card empty"><p>No standards files yet. Copy <span class="mono">standards/TEMPLATE.md</span> to start one.</p></section>
+{% endfor %}
+{% endblock %}

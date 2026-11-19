@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Runs{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Runs</h1>
+    <p class="muted">Each run turns one idea into a reviewed backlog, then into Jira issues after your approval.</p>
+  </div>
+  <a class="button" href="/new">New idea</a>
+</div>
+
+{% if runs %}
+<div class="table-wrap">
+<table class="runs">
+  <thead><tr><th>Product</th><th>Status</th><th>Backlog</th><th>Jira</th><th>Started</th></tr></thead>
+  <tbody>
+  {% for r in runs %}
+    <tr>
+      <td><a href="/runs/{{ r.run_id }}">{{ r.product or "Untitled idea" }}</a>
+          <div class="mono muted small">{{ r.run_id }}</div></td>
+      <td><span class="state state-{{ r.state | replace(' ', '-') }}">{{ r.state }}</span></td>
+      <td>{% if r.counts %}{{ r.counts.epics }} epics · {{ r.counts.features }} features · {{ r.counts.stories }} stories{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td>{% if r.created %}{{ r.created | length }} issues{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td class="small muted">{{ (r.started or "")[:16] | replace("T", " ") }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<section class="card empty">
+  <h2>No runs yet</h2>
+  <p>Start with an idea in a sentence or two. You can add context about users, systems and constraints, and pick the standards your team applies.</p>
+  <a class="button" href="/new">Turn an idea into a backlog</a>
+</section>
+{% endif %}
+{% endblock %}

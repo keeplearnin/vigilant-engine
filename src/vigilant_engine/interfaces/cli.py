@@ -19,10 +19,9 @@ import anthropic
 from pydantic import ValidationError
 
 from ..evidence import EvidenceError, RunStore, digest
-from ..intake import Backlog, BacklogPlanner, IdeaBrief, Limits, PlannerError, lint
+from ..intake import Backlog, BacklogPlanner, IdeaBrief, Limits, PlannerError, lint, service
 from ..intake.prompts import DEFAULT_PROMPT_VERSION, PROMPTS
 from ..intake.quality import has_errors
-from ..intake.render import to_markdown
 from ..integrations.jira import (
     JiraClient,
     JiraConfig,
@@ -115,6 +114,11 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("--backlog-file", type=Path, required=True)
     imp.add_argument("--runs-dir", type=Path, default=Path("runs"))
 
+    ui = sub.add_parser("ui", help="Open the local web UI in your browser")
+    ui.add_argument("--port", type=positive_int, default=8765)
+    ui.add_argument("--runs-dir", type=Path, default=Path("runs"))
+    ui.add_argument("--no-browser", action="store_true", help="Don't open a browser window")
+
     ver = cmds.add_parser("verify", help="Verify a run's event log")
     ver.add_argument("--run", type=Path, required=True)
     ver.add_argument("--expect-head", default=None,
@@ -158,7 +162,7 @@ def cmd_plan(args: argparse.Namespace, *, llm: StructuredLLM | None = None,
     brief = IdeaBrief(idea=idea, context=context)
 
     store.write_text("idea.md", idea)
-    store.write_json("limits.json", asdict(limits))
+    service.save_limits(store, limits)
     store.events.append("run.started", actor=f"human:{getpass.getuser()}",
                         payload={"idea_digest": digest(idea.encode()), "model": llm.model,
                                  "prompt_version": args.prompt_version,
@@ -187,26 +191,14 @@ def cmd_plan(args: argparse.Namespace, *, llm: StructuredLLM | None = None,
               file=out)
         return EXIT_INTERRUPTED
     except (LLMError, PlannerError, anthropic.AnthropicError) as exc:
-        message = _claude_error_message(exc)
+        message = service.claude_error_message(exc)
         store.events.append("run.failed", actor="system:intake",
                             payload={"error": message, "kind": type(exc).__name__})
         print(f"Planning failed: {message}", file=out)
         print(f"Partial run kept for the record: {store.dir}", file=out)
         return EXIT_ERROR
 
-    store.write_json("brief.json", brief.model_dump())
-    store.write_json("backlog.json", result.backlog.model_dump())
-    store.write_json("lint.json", [f.to_dict() for f in result.findings])
-    store.write_json("model-calls.json", result.calls)
-    store.write_text("backlog.md", to_markdown(result.backlog, result.findings, store.run_id))
-    planned_digest = digest(result.backlog.model_dump())
-    store.events.append("intake.planned", actor="agent:intake",
-                        payload={"backlog_digest": planned_digest,
-                                 "counts": result.backlog.counts(),
-                                 "attempts": result.attempts,
-                                 "chosen_attempt": result.chosen_attempt,
-                                 "repair_error": result.repair_error,
-                                 "publishable": result.publishable})
+    service.save_plan_outputs(store, brief, result)
 
     c = result.backlog.counts()
     print(f"\n{result.backlog.product_name}: {c['epics']} epics, {c['features']} features, "
@@ -241,18 +233,15 @@ def cmd_publish(args: argparse.Namespace, *, client: JiraClient | None = None,
         return EXIT_ERROR
     try:
         store = RunStore.open(args.run)
-        backlog = Backlog.model_validate_json(
-            store.path("backlog.json").read_text(encoding="utf-8"))
-        limits = _load_limits(store)
+        backlog, _limits, findings = service.load_backlog(store)
     except FileNotFoundError as exc:
         print(f"Not found: {exc.filename or exc}. Check the --run folder.", file=out)
         return EXIT_ERROR
     except (ValidationError, json.JSONDecodeError) as exc:
         print("backlog.json is not a valid backlog. Fix these problems and try again:",
               file=out)
-        print(_validation_summary(exc), file=out)
+        print(service.validation_summary(exc), file=out)
         return EXIT_BLOCKED
-    findings = lint(backlog, limits)
     if has_errors(findings):
         for f in findings:
             if f.severity == "error":
@@ -260,11 +249,7 @@ def cmd_publish(args: argparse.Namespace, *, client: JiraClient | None = None,
         print("Blocked by the quality gate. Fix backlog.json and try again.", file=out)
         return EXIT_BLOCKED
 
-    current = digest(backlog.model_dump())
-    planned = _planned_digest(store)
-    if planned and planned != current:
-        store.events.append("intake.backlog_edited", actor=f"human:{getpass.getuser()}",
-                            payload={"from": planned, "to": current})
+    current = service.record_edit_if_changed(store, backlog, f"human:{getpass.getuser()}")
 
     owns_client = client is None
     if client is None:
@@ -291,7 +276,7 @@ def _publish(args: argparse.Namespace, store: RunStore, backlog: Backlog, curren
         feature_mode=args.feature_mode, story_points_field=args.story_points_field,
         extra_labels=tuple(args.label), max_issues=args.max_issues,
     )
-    publisher = JiraPublisher(client, store.path("jira-manifest.json"), events=store.events)
+    publisher = JiraPublisher(client, store.path(service.MANIFEST_FILE), events=store.events)
 
     try:
         plan = publisher.prepare(backlog, opts)
@@ -308,14 +293,11 @@ def _publish(args: argparse.Namespace, store: RunStore, backlog: Backlog, curren
             if stdin.readline().strip() != args.project:
                 print("Not confirmed. Nothing was created.", file=out)
                 return EXIT_BLOCKED
-        # Local CLI identity is self-asserted; record how approval was given so reviewers
-        # can weigh it. Service mode would take the approver from SSO instead.
-        approval = store.events.append(
-            "intake.approved", actor=f"human:{approver}",
-            payload={"project": args.project, "backlog_digest": current,
-                     "plan_digest": plan.digest, "issues": len(plan.issues),
-                     "method": "--yes flag" if args.yes else "typed project key",
-                     "os_user": os_user, "interactive": bool(stdin.isatty())})
+        store.write_json(service.PLAN_FILE, plan.to_dict())
+        approval = service.record_approval(
+            store, plan_digest=plan.digest, project=args.project, issues=len(plan.issues),
+            approver=approver, method="--yes flag" if args.yes else "typed project key",
+            os_user=os_user, interactive=bool(stdin.isatty()), backlog_digest=current)
         # exactly the plan shown and approved; the approval hash goes into every issue
         report = publisher.execute(plan, anchor=approval["hash"])
     except (PublishError, JiraError) as exc:
@@ -335,51 +317,6 @@ def _publish(args: argparse.Namespace, store: RunStore, backlog: Backlog, curren
     print(f"Approval record (also in each new issue): {approval['hash']}", file=out)
     print(f"Evidence head: {store.events.head}", file=out)
     return EXIT_OK
-
-
-def _planned_digest(store: RunStore) -> str | None:
-    found = None
-    for event in store.events.events():
-        if event.get("type") == "intake.planned":
-            found = event.get("payload", {}).get("backlog_digest")
-    return found
-
-
-def _load_limits(store: RunStore) -> Limits:
-    """The limits the run was planned with, so publish judges it by the same rules."""
-    path = store.path("limits.json")
-    if not path.exists():
-        return Limits()
-    data = json.loads(path.read_text(encoding="utf-8"))
-    known = {k: int(v) for k, v in data.items() if k in Limits.__dataclass_fields__}
-    return Limits(**known)
-
-
-def _validation_summary(exc: Exception) -> str:
-    if isinstance(exc, ValidationError):
-        lines = []
-        for err in exc.errors()[:10]:
-            where = ".".join(str(p) for p in err["loc"]) or "backlog"
-            lines.append(f"  {where}: {err['msg']}")
-        more = len(exc.errors()) - 10
-        if more > 0:
-            lines.append(f"  ... and {more} more")
-        return "\n".join(lines)
-    if isinstance(exc, json.JSONDecodeError):
-        return f"  line {exc.lineno}, column {exc.colno}: {exc.msg}"
-    return f"  {exc}"
-
-
-def _claude_error_message(exc: Exception) -> str:
-    if isinstance(exc, anthropic.AuthenticationError):
-        return "Claude rejected the API credentials. Check ANTHROPIC_API_KEY or `ant auth login`."
-    if isinstance(exc, anthropic.RateLimitError):
-        return "Claude rate limit reached. Wait a minute and run plan again."
-    if isinstance(exc, anthropic.APIStatusError) and exc.status_code >= 500:
-        return f"Claude is temporarily unavailable ({exc.status_code}). Try again shortly."
-    if isinstance(exc, anthropic.APIConnectionError):
-        return "Could not connect to Claude. Check the network and try again."
-    return str(exc)
 
 
 def _print_plan(plan: PublishPlan, out: TextIO) -> None:
@@ -409,19 +346,17 @@ def cmd_import(args: argparse.Namespace, out: TextIO = sys.stdout) -> int:
         print(f"File not found: {args.backlog_file}", file=out)
         return EXIT_ERROR
     except (ValidationError, json.JSONDecodeError) as exc:
-        print(f"{args.backlog_file} is not a valid backlog:\n{_validation_summary(exc)}",
+        print(f"{args.backlog_file} is not a valid backlog:\n{service.validation_summary(exc)}",
               file=out)
         return EXIT_ERROR
 
     findings = lint(backlog)
     store = RunStore(args.runs_dir)
-    store.write_json("limits.json", asdict(Limits()))
+    service.save_limits(store, Limits())
     author = f"human:{getpass.getuser()}"
     store.events.append("run.started", actor=author,
                         payload={"source": "import", "file": str(args.backlog_file)})
-    store.write_json("backlog.json", backlog.model_dump())
-    store.write_json("lint.json", [f.to_dict() for f in findings])
-    store.write_text("backlog.md", to_markdown(backlog, findings, store.run_id))
+    service.save_backlog(store, backlog)
     store.events.append("intake.planned", actor=author,
                         payload={"backlog_digest": digest(backlog.model_dump()),
                                  "counts": backlog.counts(), "source": "import",
@@ -455,6 +390,10 @@ def cmd_verify(args: argparse.Namespace, out: TextIO = sys.stdout) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.area == "ui":
+        from .web.app import serve
+        serve(port=args.port, runs_dir=args.runs_dir, open_browser=not args.no_browser)
+        return EXIT_OK
     handlers = {"plan": cmd_plan, "publish": cmd_publish, "import": cmd_import,
                 "verify": cmd_verify}
     try:

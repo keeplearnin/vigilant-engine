@@ -211,3 +211,22 @@ def test_ctrl_c_during_plan_is_recorded(tmp_path):
     code, run_dir, out = plan(tmp_path, FakeLLM(KeyboardInterrupt()))
     assert code == 130 and "Stopped" in out
     assert "KeyboardInterrupt" in (run_dir / "events.jsonl").read_text()
+
+
+def test_two_log_instances_keep_the_chain_intact(tmp_path):
+    path = tmp_path / "events.jsonl"
+    job, request = EventLog(path), EventLog(path)
+    job.append("a", actor="t", payload={})
+    request.append("b", actor="t", payload={})  # another writer appends
+    job.append("c", actor="t", payload={})      # stale head must be re-read
+    assert EventLog(path).verify()[0]
+
+
+def test_publish_plan_round_trips(backlog_dict, tmp_path):
+    from vigilant_engine.intake import Backlog
+    from vigilant_engine.integrations.jira import JiraPublisher, PublishOptions, PublishPlan
+    data = copy.deepcopy(backlog_dict)
+    plan = JiraPublisher(None, tmp_path / "m.json").prepare(
+        Backlog.model_validate(data), PublishOptions(project_key="CLM", run_id="r1"))
+    restored = PublishPlan.from_dict(json.loads(json.dumps(plan.to_dict())))
+    assert restored.digest == plan.digest and restored.issues[3].depends_on

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Intake{% endblock %} · vigilant-engine</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="/">vigilant<span>·</span>intake</a>
+      <nav>
+        <a href="/">Runs</a>
+        <a href="/new" class="button small">New idea</a>
+        <a href="/standards">Standards</a>
+      </nav>
+      <div class="status">
+        <span class="pill {{ 'ok' if claude_ready else 'warn' }}"
+              title="{{ 'Claude API credentials found' if claude_ready else 'Set ANTHROPIC_API_KEY and restart' }}">
+          Claude {{ 'ready' if claude_ready else 'not set' }}</span>
+        <span class="pill {{ 'ok' if jira_ready else 'warn' }}"
+              title="{{ 'Jira site configured' if jira_ready else 'Set JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN and restart' }}">
+          Jira {{ 'ready' if jira_ready else 'not set' }}</span>
+      </div>
+    </div>
+  </header>
+  <main class="wrap">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="wrap footer">
+    Runs locally on this computer. Claude drafts; the quality gate and your approval decide.
+  </footer>
+</body>
+</html>
